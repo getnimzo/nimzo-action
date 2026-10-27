@@ -1,0 +1,25 @@
+name: Nimzo evaluation
+description: Evaluates a pull request's Terraform changes against Nimzo policies, as a check and one pull request comment.
+author: Nimzo
+
+inputs:
+  nimzo-url:
+    description: URL of Nimzo, without a path. The CLI calls the API under it, and the policy links in the comment and annotations point at it.
+    default: https://staging.nimzo.dev
+  nimzo-token:
+    # Not `required`: a fork's pull request gets an empty secret, and the action then says why it cannot evaluate it.
+    description: Organization API key (ak_…) the Nimzo CLI sends to the governance API, created by an Admin in Nimzo under Settings → API keys. Required.
+  github-token:
+    description: Token that lists the pull request's changed files, downloads the Nimzo CLI from GitHub Packages, writes the pull request comment and creates the Nimzo policies check run.
+    default: ${{ github.token }}
+  nimzo-version:
+    description: Version of the Nimzo CLI to download from ghcr.io/getnimzo/nimzo-cli, a tag or the digest of its manifest.
+    default: latest
+
+outputs:
+  verdict:
+    description: The verdict as JSON, with the check conclusion, each folder's Nimzo task, and every open finding with its severity, remediation, file and line, as described in the README.
+
+runs:
+  using: node24
+  main: dist/index.cjs
