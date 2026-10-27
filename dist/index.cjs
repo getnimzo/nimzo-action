@@ -25530,7 +25530,7 @@ var UNAUTHORIZED_ERROR_CODE = "GENERIC_UNAUTHORIZED";
 function buildFindingKey(folder, rule) {
   return (0, import_node_crypto2.createHash)("sha256").update([folder, rule.policyId, rule.resourceId, rule.message].join("\0")).digest("hex").slice(0, 16);
 }
-function buildVerdict(report, previousFindings) {
+function buildVerdict(report, previousFindings, headSha) {
   const occurrencesByKey = /* @__PURE__ */ new Map();
   const openFindings = report.folders.flatMap(
     (folder) => folder.failedRules.map((rule) => {
@@ -25556,9 +25556,13 @@ function buildVerdict(report, previousFindings) {
   const staleFindings = previousFindingsNotFound.filter(
     (finding) => finding.status === "open" && unevaluatedFolders.has(finding.folder)
   );
-  const resolvedFindings = previousFindingsNotFound.filter((finding) => !staleFindings.includes(finding)).map((finding) => ({ ...finding, status: "resolved" }));
+  const resolvedFindings = previousFindingsNotFound.filter((finding) => !staleFindings.includes(finding)).map((finding) => ({
+    ...finding,
+    status: "resolved",
+    resolvedIn: finding.status === "open" ? headSha : finding.resolvedIn
+  }));
   const verdict = {
-    folders: report.folders.map(({ path: path4, outcome }) => ({ path: path4, outcome })),
+    folders: report.folders.map(buildVerdictFolder),
     openFindings,
     staleFindings,
     resolvedFindings,
@@ -25620,12 +25624,22 @@ function describeFolderError(error2) {
 function buildPolicyUrl(appUrl, policyId) {
   return `${appUrl.replace(/\/+$/, "")}/policies/${encodeURIComponent(policyId)}`;
 }
-function countLabel(count, noun) {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+function countLabel(count, noun, plural = `${noun}s`) {
+  return `${count} ${count === 1 ? noun : plural}`;
 }
 function storeOpenFinding(finding) {
-  const { key, folder, policyId, title, severity, resourceId } = finding;
-  return { key, folder, policyId, title, severity, resourceId, status: "open" };
+  const { key, folder, policyId, title, severity, resourceId, blocking, file, line } = finding;
+  return { key, folder, policyId, title, severity, resourceId, blocking, file, line, status: "open", resolvedIn: null };
+}
+function buildVerdictFolder(folder) {
+  return {
+    path: folder.path,
+    outcome: folder.outcome,
+    url: folder.url ?? null,
+    stackName: folder.stackName ?? null,
+    policyCount: folder.policyCount ?? null,
+    bundleCount: folder.bundleCount ?? null
+  };
 }
 
 // src/verdict-comment.ts
@@ -25634,11 +25648,10 @@ var COMMENT_SIZE_LIMIT = 6e4;
 var CHECK_SUMMARY_SIZE_LIMIT = 65e3;
 var STATE_SIZE_LIMIT = 2e4;
 var STATE_PATTERN = /<!-- nimzo-verdict-state (.*?) -->/s;
-var CONCLUSION_ICON = { success: "\u2705", neutral: "\u26A0\uFE0F", failure: "\u274C" };
-var SEVERITY_ICON = { Critical: "\u{1F534}", High: "\u{1F7E0}", Medium: "\u{1F7E1}", Low: "\u{1F535}" };
 var SEVERITY_ORDER = ["Critical", "High", "Medium", "Low"];
+var FOOTER = "<sub>Nimzo re-checks every push and updates this comment.</sub>";
 function buildVerdictCommentBody(content) {
-  const state = writeVerdictState(content.verdict.storedFindings);
+  const state = writeVerdictState({ headSha: content.headSha, findings: content.verdict.storedFindings });
   const markdown = fitVerdictMarkdownInLimit(
     content,
     COMMENT_SIZE_LIMIT - VERDICT_COMMENT_MARKER.length - state.length - 2
@@ -25661,151 +25674,211 @@ function fitVerdictMarkdownInLimit(content, limit) {
 }
 function buildVerdictMarkdown(content, detail = { style: "full", maxFindings: Number.POSITIVE_INFINITY }) {
   const { verdict } = content;
-  const sortedFindings = [...verdict.openFindings].sort(
-    (a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity)
-  );
-  const shownFindings = sortedFindings.slice(0, detail.maxFindings);
-  const hiddenCount = sortedFindings.length - shownFindings.length;
+  const shownFindings = sortFindings(verdict.openFindings).slice(0, detail.maxFindings);
+  const hiddenCount = verdict.openFindings.length - shownFindings.length;
+  const stackBlocks = verdict.folders.map(
+    (folder) => buildStackBlockMarkdown(
+      content,
+      folder,
+      shownFindings.filter((finding) => finding.folder === folder.path),
+      detail
+    )
+  ).filter((block) => block !== null);
   const sections = [
-    `## ${buildHeadingIcon(verdict)} Nimzo policies: ${verdict.title}`,
-    buildSummaryLine(content),
-    buildFoldersTable(verdict),
-    buildFindingsSection(
-      "\u274C Blocking",
-      shownFindings.filter((finding) => finding.blocking),
-      content,
-      detail
-    ),
-    buildFindingsSection(
-      "\u26A0\uFE0F Warnings",
-      shownFindings.filter((finding) => !finding.blocking),
-      content,
-      detail
-    ),
+    ...stackBlocks.length === 0 ? [buildNothingCheckedMarkdown(content)] : stackBlocks,
     hiddenCount > 0 ? `_${countLabel(hiddenCount, "more finding")}: see the job summary._` : null,
-    buildStaleFindingsSection(verdict.staleFindings, content.appUrl),
-    buildResolvedFindingsSection(verdict.resolvedFindings, content.appUrl)
+    buildResolvedFindingsSection(verdict.resolvedFindings, content),
+    buildStaleFindingsSection(verdict.staleFindings),
+    verdict.openFindings.length > 0 ? FOOTER : null
   ];
   return `${sections.filter((section) => section !== null).join("\n\n")}
 `;
 }
-function buildHeadingIcon(verdict) {
-  return verdict.conclusion === "neutral" && verdict.openFindings.length === 0 ? "\u2139\uFE0F" : CONCLUSION_ICON[verdict.conclusion];
-}
-function buildSummaryLine({ verdict, repositoryUrl, headSha }) {
-  const commit = `commit [\`${headSha.slice(0, 7)}\`](${repositoryUrl}/commit/${headSha})`;
-  if (verdict.openFindings.length === 0) {
-    const reason = verdict.hasNoTerraformChange ? "No Terraform change" : "No open finding";
-    return `${reason} at ${commit}.`;
-  }
-  const counts = SEVERITY_ORDER.map(
-    (severity) => `${severity} ${verdict.openFindings.filter((finding) => finding.severity === severity).length}`
+function sortFindings(findings) {
+  return [...findings].sort(
+    (a, b) => Number(b.blocking) - Number(a.blocking) || SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity)
   );
-  return `${counts.join(" \xB7 ")} at ${commit}. Blocking follows the enforcement mode set in Nimzo.`;
 }
-function buildFindingsSection(heading, findings, content, detail) {
-  if (findings.length === 0) return null;
-  const policies = groupFindingsByPolicy(findings);
-  const items = detail.style === "full" ? policies.map((policyFindings) => buildPolicyFindingsMarkdown(policyFindings, content)).join("\n\n") : policies.map((policyFindings) => `- ${buildPolicySummary(policyFindings, content.appUrl)}`).join("\n");
-  const failedPolicies = policies.length === 1 ? "1 policy failed" : `${policies.length} policies failed`;
-  return `<details>
-<summary><b>${heading}: ${failedPolicies}</b></summary>
+function buildStackBlockMarkdown(content, folder, shownFindings, detail) {
+  switch (folder.outcome) {
+    case "skipped":
+      return null;
+    case "no_policies":
+      return buildNoPoliciesBlock(content, folder);
+    case "error":
+      return buildCouldNotEvaluateBlock(content, folder);
+    default:
+      return buildEvaluatedBlock(content, folder, shownFindings, detail);
+  }
+}
+function buildEvaluatedBlock(content, folder, shownFindings, detail) {
+  const findings = content.verdict.openFindings.filter((finding) => finding.folder === folder.path);
+  const blocking = findings.filter((finding) => finding.blocking).length;
+  const warnings = findings.length - blocking;
+  const sections = [
+    buildEvaluatedAlert(content, folder, blocking, warnings),
+    shownFindings.length === 0 ? null : buildFindingsTable(shownFindings, content),
+    ...detail.style === "full" ? shownFindings.map((finding) => buildFindingDetails(finding, content)) : []
+  ];
+  return sections.filter((section) => section !== null).join("\n\n");
+}
+function buildEvaluatedAlert(content, folder, blocking, warnings) {
+  const stack = buildStackHeadline(folder);
+  const delta = buildPreviousBlockingLabel(content, folder);
+  if (blocking > 0) {
+    const counts = [`${blocking} blocking`, warnings > 0 ? countLabel(warnings, "warning") : null];
+    return buildAlert(
+      "CAUTION",
+      `${stack} \u2014 ${counts.filter((count) => count !== null).join(", ")}`,
+      buildCheckedLine(content, folder, delta ?? buildPoliciesFromBundlesLabel(folder))
+    );
+  }
+  if (warnings > 0) {
+    return buildAlert(
+      "WARNING",
+      `${stack} \u2014 passed with ${countLabel(warnings, "warning")}`,
+      `Nothing in this stack blocks the pull request. ${buildCheckedLine(content, folder, delta ?? buildPoliciesLabel(folder.policyCount))}`
+    );
+  }
+  const passed = folder.policyCount === null ? "passed" : `all ${buildPoliciesLabel(folder.policyCount)} passed`;
+  return buildAlert(
+    "TIP",
+    `${stack} \u2014 ${passed}`,
+    buildCheckedLine(content, folder, delta ?? buildBundlesLabel(folder.bundleCount))
+  );
+}
+function buildNoPoliciesBlock(content, folder) {
+  const stack = folder.stackName ?? buildFolderLabel(folder.path);
+  return [
+    buildAlert(
+      "NOTE",
+      `${buildStackHeadline(folder)} \u2014 could not evaluate`,
+      "No published policy applies to this stack, so nothing was checked. This is not a pass."
+    ),
+    `[Assign bundles with published policies to ${stack}](${buildAppPageUrl(content.appUrl, "audits")}). The next push is checked automatically.`
+  ].join("\n\n");
+}
+function buildCouldNotEvaluateBlock({ verdict, appUrl }, folder) {
+  const folderError = verdict.folderErrors.find((error2) => error2.folder === folder.path);
+  const policyErrors = verdict.policyErrors.filter((error2) => error2.folder === folder.path).map((error2) => `${buildCodeSpan(error2.policyId)} ${error2.title}: ${error2.message}`);
+  const reasons = [folderError === void 0 ? null : describeFolderError(folderError), ...policyErrors];
+  return [
+    buildAlert(
+      "NOTE",
+      `${buildStackHeadline(folder)} \u2014 could not evaluate`,
+      "The check stopped before it finished. Nothing was checked. This is not a pass."
+    ),
+    // A reason can span lines, such as Terraform's parse errors: kept on one line, it stays one paragraph.
+    `**Reason:** ${reasons.filter((reason) => reason !== null).join("; ").replaceAll(/\s+/g, " ").trim()}`,
+    `Re-run the job. [View in Nimzo](${folder.url ?? buildAppPageUrl(appUrl, "audits")})`
+  ].join("\n\n");
+}
+function buildNothingCheckedMarkdown(content) {
+  const headline = content.verdict.hasNoTerraformChange ? "Nimzo \u2014 no Terraform change" : "Nimzo \u2014 no changed folder has a Nimzo stack";
+  return buildAlert("TIP", headline, buildCheckedLine(content, null, null));
+}
+function buildAlert(kind, headline, line) {
+  return `> [!${kind}]
+> **${headline}**\\
+> ${line}`;
+}
+function buildStackHeadline(folder) {
+  return `Nimzo \xB7 ${folder.stackName ?? buildFolderLabel(folder.path)}`;
+}
+function buildCheckedLine(content, folder, note) {
+  const parts = [
+    `Checked ${buildCommitLinkMarkdown(content.headSha, content.repositoryUrl)}`,
+    note,
+    folder === null || folder.url === null ? null : `[View in Nimzo](${folder.url})`
+  ];
+  return parts.filter((part) => part !== null).join(" \xB7 ");
+}
+function buildPreviousBlockingLabel({ previousState, headSha, repositoryUrl }, folder) {
+  if (previousState.headSha === null || previousState.headSha === headSha) return null;
+  const blocking = previousState.findings.filter(
+    (finding) => finding.folder === folder.path && finding.status === "open" && finding.blocking
+  ).length;
+  if (blocking === 0) return null;
+  return `was ${blocking} blocking on ${buildCommitLinkMarkdown(previousState.headSha, repositoryUrl)}`;
+}
+function buildPoliciesFromBundlesLabel(folder) {
+  const policies = buildPoliciesLabel(folder.policyCount);
+  const bundles = buildBundlesLabel(folder.bundleCount);
+  if (policies === null || bundles === null) return policies;
+  return `${policies} from ${bundles}`;
+}
+function buildPoliciesLabel(policyCount) {
+  return policyCount === null ? null : countLabel(policyCount, "policy", "policies");
+}
+function buildBundlesLabel(bundleCount) {
+  return bundleCount === null ? null : countLabel(bundleCount, "bundle");
+}
+function buildFindingsTable(findings, content) {
+  const rows = findings.map(
+    (finding) => [
+      buildFindingIcon(finding),
+      `[${finding.title}](${buildPolicyUrl(content.appUrl, finding.policyId)}) ${buildCodeSpan(finding.policyId)}`,
+      buildSeverityLabel(finding),
+      buildFileLinkMarkdown(finding, content) ?? `${buildCodeSpan(finding.resourceId)} in ${buildFolderReference(finding.folder)}`
+    ].map(escapeMarkdownTableCell).join(" | ")
+  );
+  return `| | Policy | Severity | Where |
+| --- | --- | --- | --- |
+${rows.map((row) => `| ${row} |`).join("\n")}`;
+}
+function buildFindingDetails(finding, content) {
+  const snippet = content.snippets.get(finding.key);
+  const summary2 = [
+    `${buildFindingIcon(finding)} <b>${escapeHtml(finding.title)}</b>`,
+    `<code>${escapeHtml(finding.policyId)}</code>`,
+    escapeHtml(buildSeverityLabel(finding)),
+    `<code>${escapeHtml(finding.resourceId)}</code>`
+  ].join(" \xB7 ");
+  const body = [
+    `**Why this policy exists**
 
-${items}
+${finding.description}`,
+    finding.remediation === null ? null : `**How to fix**
+
+${finding.remediation}`,
+    buildFileLinkMarkdown(finding, content),
+    `> ${finding.message.replaceAll(/\r?\n/g, " ")}`,
+    snippet === void 0 ? null : buildSnippetMarkdown(snippet)
+  ].filter((part) => part !== null);
+  return `<details${finding.blocking ? " open" : ""}>
+<summary>${summary2}</summary>
+
+${body.join("\n\n")}
 
 </details>`;
 }
-function groupFindingsByPolicy(findings) {
-  const byPolicy = /* @__PURE__ */ new Map();
-  for (const finding of findings) {
-    byPolicy.set(finding.policyId, [...byPolicy.get(finding.policyId) ?? [], finding]);
-  }
-  return [...byPolicy.values()];
+function buildFindingIcon(finding) {
+  return finding.blocking ? "\u{1F534}" : "\u{1F7E1}";
 }
-function buildPolicyFindingsMarkdown(policyFindings, content) {
-  const [policy] = policyFindings;
-  return [
-    `#### ${buildPolicySummary(policyFindings, content.appUrl)}`,
-    `**Risk:** ${policy.description}`,
-    policy.remediation === null ? null : `**Suggested fix:** ${policy.remediation}`,
-    ...policyFindings.map((finding) => buildFindingMarkdown(finding, content))
-  ].filter((part) => part !== null).join("\n\n");
+function buildSeverityLabel(finding) {
+  return finding.blocking ? finding.severity : `${finding.severity} \xB7 warn only`;
 }
-function buildPolicySummary(policyFindings, appUrl) {
-  const [policy] = policyFindings;
-  const resources = new Set(policyFindings.map((finding) => `${finding.folder}\0${finding.resourceId}`)).size;
-  return `${SEVERITY_ICON[policy.severity]} ${policy.severity} \xB7 ${policy.title} \xB7 ${buildPolicyLinkMarkdown(policy.policyId, appUrl)} \xB7 ${countLabel(resources, "resource")}`;
-}
-function buildPolicyLinkMarkdown(policyId, appUrl) {
-  return `[${buildCodeSpan(policyId)}](${buildPolicyUrl(appUrl, policyId)})`;
-}
-function buildFindingMarkdown(finding, content) {
-  const snippet = content.snippets.get(finding.key);
-  return [
-    buildFindingLocationMarkdown(finding, content),
-    `> ${finding.message.replaceAll(/\r?\n/g, " ")}`,
-    snippet === void 0 ? null : buildSnippetMarkdown(snippet)
-  ].filter((part) => part !== null).join("\n\n");
-}
-function buildFindingLocationMarkdown(finding, { repositoryUrl, headSha }) {
-  const resource = buildCodeSpan(finding.resourceId);
-  if (finding.file === null) return `${resource} in ${buildFolderReference(finding.folder)}`;
-  const position = finding.line === null ? finding.file : `${finding.file}:${finding.line}`;
+function buildFileLinkMarkdown(finding, { repositoryUrl, headSha }) {
+  if (finding.file === null) return null;
   const anchor = finding.line === null ? "" : `#L${finding.line}`;
   const url = `${repositoryUrl}/blob/${headSha}/${finding.file.split("/").map(encodeURIComponent).join("/")}${anchor}`;
-  return `[${buildCodeSpan(position)}](${url}) \xB7 ${resource}`;
+  return `[${buildCodeSpan(buildFilePosition(finding.file, finding.line))}](${url})`;
+}
+function buildFilePosition(file, line) {
+  return line === null ? file : `${file}:${line}`;
 }
 function buildSnippetMarkdown(snippet) {
-  const lastLine = snippet.firstLine + snippet.lines.length - 1;
-  const width = String(lastLine).length;
-  const lines = snippet.lines.map((text, index) => {
-    const number = snippet.firstLine + index;
-    const marker = number === snippet.offendingLine ? ">" : " ";
-    return `${marker} ${String(number).padStart(width)} | ${text}`.trimEnd();
-  });
-  const fence = "`".repeat(Math.max(3, longestBacktickRun(lines.join("\n")) + 1));
+  const code = snippet.lines.map((line) => line.trimEnd()).join("\n").replaceAll(/^\n+|\n+$/g, "");
+  const fence = "`".repeat(Math.max(3, longestBacktickRun(code) + 1));
   return `${fence}hcl
-${lines.join("\n")}
+${code}
 ${fence}`;
 }
-function buildFoldersTable(verdict) {
-  if (verdict.folders.length === 0) return null;
-  const rows = verdict.folders.map(
-    ({ path: path4, outcome }) => `| ${escapeMarkdownTableCell(buildFolderCell(path4))} | ${escapeMarkdownTableCell(describeFolderResult(path4, outcome, verdict))} |`
-  );
-  const notes = [
-    verdict.folders.some((folder) => folder.outcome === "error") ? "_Could not evaluate: Nimzo could not give a verdict on these folders, so the check fails until they are evaluated._" : null,
-    verdict.folders.some((folder) => folder.outcome === "no_policies") ? "_No policies applied: no policies found in Nimzo for these folders, so nothing was evaluated. Assign at least one bundle to the stack in Nimzo to run an evaluation._" : null
-  ].filter((note) => note !== null);
-  return [`| Folder | Result |
-| --- | --- |
-${rows.join("\n")}`, ...notes].join("\n\n");
+function buildCommitLinkMarkdown(sha, repositoryUrl) {
+  return `[${buildCodeSpan(sha.slice(0, 7))}](${repositoryUrl}/commit/${sha})`;
 }
-function describeFolderResult(folder, outcome, verdict) {
-  switch (outcome) {
-    case "skipped":
-      return "\u23ED\uFE0F Not evaluated: no Nimzo stack at this folder";
-    case "no_policies":
-      return "\u2139\uFE0F No policies applied";
-    case "error": {
-      const folderError = verdict.folderErrors.find((error2) => error2.folder === folder);
-      const policyErrors = verdict.policyErrors.filter((error2) => error2.folder === folder).map((error2) => `\`${error2.policyId}\` ${error2.title}: ${error2.message}`);
-      const reasons = [folderError === void 0 ? null : describeFolderError(folderError), ...policyErrors];
-      return `\u274C Could not evaluate: ${reasons.filter((reason) => reason !== null).join("; ")}`;
-    }
-    default: {
-      const findings = verdict.openFindings.filter((finding) => finding.folder === folder);
-      const blocking = findings.filter((finding) => finding.blocking).length;
-      const warnings = findings.length - blocking;
-      if (blocking > 0) {
-        return `\u274C ${[countLabel(blocking, "blocking finding"), warnings > 0 ? countLabel(warnings, "warning") : null].filter((part) => part !== null).join(", ")}`;
-      }
-      return warnings > 0 ? `\u26A0\uFE0F ${countLabel(warnings, "warning")}` : "\u2705 Passed";
-    }
-  }
-}
-function buildFolderCell(folder) {
-  return folder === "." ? buildFolderLabel(folder) : buildCodeSpan(folder);
+function buildAppPageUrl(appUrl, path4) {
+  return `${appUrl.replace(/\/+$/, "")}/${path4}`;
 }
 function buildFolderReference(folder) {
   return folder === "." ? "the repository root" : buildCodeSpan(folder);
@@ -25813,38 +25886,46 @@ function buildFolderReference(folder) {
 function escapeMarkdownTableCell(text) {
   return text.replaceAll("|", "\\|").replaceAll(/\r?\n/g, " ");
 }
-function buildStaleFindingsSection(findings, appUrl) {
+function escapeHtml(text) {
+  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+function buildResolvedFindingsSection(findings, content) {
   if (findings.length === 0) return null;
-  const items = findings.map((finding) => `- ${buildStoredFindingMarkdown(finding, appUrl)}`).join("\n");
+  const items = findings.map((finding) => {
+    const fixedIn = finding.resolvedIn === null ? null : `fixed in ${buildCommitLinkMarkdown(finding.resolvedIn, content.repositoryUrl)}`;
+    const parts = [`~~${finding.title}~~`, ...buildStoredFindingParts(finding), fixedIn];
+    return `- ${parts.filter((part) => part !== null).join(" \xB7 ")}`;
+  });
+  return `<details open>
+<summary>\u2705 ${findings.length} resolved</summary>
+
+${items.join("\n")}
+
+</details>`;
+}
+function buildStaleFindingsSection(findings) {
+  if (findings.length === 0) return null;
+  const items = findings.map((finding) => `- ${[finding.title, ...buildStoredFindingParts(finding)].join(" \xB7 ")}`);
   return `<details>
 <summary>Not re-evaluated (${findings.length})</summary>
 
 Found on an earlier commit, in a folder that could not be evaluated this time.
 
-${items}
+${items.join("\n")}
 
 </details>`;
 }
-function buildResolvedFindingsSection(findings, appUrl) {
-  if (findings.length === 0) return null;
-  const items = findings.map((finding) => `- ~~${buildStoredFindingMarkdown(finding, appUrl)}~~`).join("\n");
-  return `<details>
-<summary>\u2705 Resolved (${findings.length})</summary>
-
-${items}
-
-</details>`;
+function buildStoredFindingParts(finding) {
+  const where = finding.file === null ? `${buildCodeSpan(finding.resourceId)} in ${buildFolderReference(finding.folder)}` : buildCodeSpan(buildFilePosition(finding.file, finding.line));
+  return [buildCodeSpan(finding.policyId), where];
 }
-function buildStoredFindingMarkdown(finding, appUrl) {
-  return `${finding.severity} \xB7 ${finding.title} \xB7 ${buildPolicyLinkMarkdown(finding.policyId, appUrl)} \xB7 ${buildCodeSpan(finding.resourceId)} in ${buildFolderReference(finding.folder)}`;
-}
-function writeVerdictState(findings) {
+function writeVerdictState({ headSha, findings }) {
   const ordered = [
     ...findings.filter((finding) => finding.status === "open").sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity)),
     ...findings.filter((finding) => finding.status === "resolved")
   ];
   const kept = [];
-  let size = serializeVerdictState([]).length;
+  let size = serializeVerdictState(headSha, []).length;
   for (const finding of ordered) {
     const serialized = serializeStoredFinding(finding);
     const added = serialized.length + (kept.length === 0 ? 0 : 1);
@@ -25852,23 +25933,39 @@ function writeVerdictState(findings) {
     kept.push(serialized);
     size += added;
   }
-  return serializeVerdictState(kept);
+  return serializeVerdictState(headSha, kept);
 }
-function serializeVerdictState(serializedFindings) {
-  return `<!-- nimzo-verdict-state [${serializedFindings.join(",")}] -->`;
+function serializeVerdictState(headSha, serializedFindings) {
+  return `<!-- nimzo-verdict-state {"headSha":${JSON.stringify(headSha)},"findings":[${serializedFindings.join(",")}]} -->`;
 }
 function serializeStoredFinding(finding) {
   return JSON.stringify(finding).replaceAll("--", "-\\u002d");
 }
 function readVerdictState(body) {
+  const empty = { headSha: null, findings: [] };
   const json = STATE_PATTERN.exec(body)?.[1];
-  if (json === void 0) return [];
+  if (json === void 0) return empty;
   try {
-    const findings = JSON.parse(json);
-    return Array.isArray(findings) ? findings.filter(isStoredFinding) : [];
+    const state = JSON.parse(json);
+    if (Array.isArray(state)) return { headSha: null, findings: readStoredFindings(state) };
+    if (typeof state !== "object" || state === null) return empty;
+    const { headSha, findings } = state;
+    return {
+      headSha: typeof headSha === "string" ? headSha : null,
+      findings: Array.isArray(findings) ? readStoredFindings(findings) : []
+    };
   } catch {
-    return [];
+    return empty;
   }
+}
+function readStoredFindings(values) {
+  return values.filter(isStoredFinding).map((finding) => ({
+    ...finding,
+    blocking: finding.blocking ?? false,
+    file: finding.file ?? null,
+    line: finding.line ?? null,
+    resolvedIn: finding.resolvedIn ?? null
+  }));
 }
 function isStoredFinding(value) {
   if (typeof value !== "object" || value === null) return false;
@@ -26039,13 +26136,15 @@ async function run() {
     const workspace = process.env["GITHUB_WORKSPACE"] ?? process.cwd();
     const report = await evaluateChangedFolders(octokit, githubToken, pullRequest, nimzoUrl, nimzoApiKey, workspace);
     const existingComment = await findVerdictComment(octokit, context2.repo, pullRequest.number);
-    const verdict = buildVerdict(report, existingComment === null ? [] : readVerdictState(existingComment.body));
+    const previousState = existingComment === null ? { headSha: null, findings: [] } : readVerdictState(existingComment.body);
+    const verdict = buildVerdict(report, previousState.findings, pullRequest.head.sha);
     const content = {
       verdict,
       snippets: readFindingSnippets(workspace, verdict.openFindings),
       repositoryUrl: buildRepositoryUrl(),
       appUrl: nimzoUrl,
-      headSha: pullRequest.head.sha
+      headSha: pullRequest.head.sha,
+      previousState
     };
     await reportVerdictInJob(verdict, nimzoUrl, buildVerdictMarkdown(content));
     if (existingComment !== null || verdict.conclusion !== "success") {
