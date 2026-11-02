@@ -1,5 +1,5 @@
 name: Nimzo evaluation
-description: Evaluates a pull request's Terraform changes against Nimzo policies, as a check and one pull request comment.
+description: Evaluates a pull request's Terraform changes against Nimzo policies, on the job's check and in one pull request comment.
 author: Nimzo
 
 inputs:
@@ -10,7 +10,7 @@ inputs:
     # Not `required`: a fork's pull request gets an empty secret, and the action then says why it cannot evaluate it.
     description: Organization API key (ak_…) the Nimzo CLI sends to the governance API, created by an Admin in Nimzo under Settings → API keys. Required.
   github-token:
-    description: Token that lists the pull request's changed files, downloads the Nimzo CLI from GitHub Packages, writes the pull request comment and creates the Nimzo policies check run.
+    description: Token that lists the pull request's changed files, downloads the Nimzo CLI from GitHub Packages, writes the pull request comment, and finds the job's check run among the workflow run's jobs to write the verdict on it.
     default: ${{ github.token }}
   nimzo-version:
     description: Version of the Nimzo CLI to download from ghcr.io/getnimzo/nimzo-cli, a tag or the digest of its manifest.

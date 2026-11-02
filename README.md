@@ -4,9 +4,10 @@ Evaluates the Terraform folders a pull request changes against the policies of t
 
 For each folder of the pull request that holds a changed `*.tf`, `*.tf.json`, `*.tfvars` or `*.tfvars.json` file, the action finds the Nimzo stack imported from this repository at that folder, and evaluates the folder's Terraform files against the policy bundles assigned to the stack. A folder with no Nimzo stack is skipped. The action then reports:
 
-- **The `Nimzo policies` check**, created on the pull request's head commit. Mark it as required to block merging (see [Required check](#required-check)).
+- **The verdict on the job's check**: the action writes it on the check run of the workflow job that runs it, rather than creating a check of its own, and fails the job when the verdict blocks. Mark the job's check as required to block merging (see [Required check](#required-check)).
 - **One pull request comment**, updated on every new commit, with one block per changed stack. An evaluated stack opens with a GitHub alert (caution for blocking findings, warning for warnings only, tip when everything passed) that gives the commit checked, the policies and bundles evaluated or how many findings blocked on the previous commit, and a link to its audit in Nimzo. A table lists each finding, blocking first: its policy, linked to Nimzo, its severity, and its file and line. Under it, each finding unfolds into why its policy exists, how to fix it, the rule's message and the offending snippet; blocking findings start unfolded. A stack with no policy to apply, or that could not be evaluated, gets a note: where to assign bundles, or the reason and the link to its audit. Findings that disappeared since an earlier commit are listed as resolved, with the commit that fixed them. A folder with no Nimzo stack gets no block. When the comment would exceed GitHub's size limit, it drops the details, then findings, and points to the job summary, which holds the full verdict. A first run with nothing to report leaves no comment.
-- An annotation on the offending line of each finding, on the `Nimzo policies` check: a failure for Critical and High, a warning for Medium, a notice for Low, with the link to the policy in Nimzo. Every finding gets one: the check takes them 50 per request, without the cap of 10 per level that annotations written from a step have. Errors, skipped folders and findings without a location are annotated on the job. The job summary holds the full verdict.
+- An annotation on the offending line of each finding, on the job's check: a failure for Critical and High, a warning for Medium, a notice for Low, with the link to the policy in Nimzo. They show in the pull request's Checks tab and on their lines under Files changed. Every finding gets one: the check run takes them 50 per request, without the cap of 10 per level that annotations written from a step have. Errors, skipped folders and findings without a location are annotated from the step.
+- **The job summary**, on the workflow run's page, with the full verdict.
 - The [`verdict` output](#verdict-output), for the workflow's next steps.
 
 The action runs on `pull_request` events only. It fails a pull request that changes more files than GitHub lists (3000), since the folders of the unlisted ones would go unevaluated.
@@ -25,6 +26,7 @@ permissions:
   contents: read
   pull-requests: write
   checks: write
+  actions: read
   packages: read
 
 # A newer commit cancels the run of the previous one.
@@ -34,6 +36,7 @@ concurrency:
 
 jobs:
   evaluate:
+    name: Evaluate policies
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,32 +49,42 @@ jobs:
 | --------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `nimzo-url`     | `https://staging.nimzo.dev` | URL of Nimzo, without a path: the CLI calls the API under it, and the policy links in the comment and annotations point at it |
 | `nimzo-token`   | required                    | Organization API key (`ak_…`) the Nimzo CLI sends to the governance API, see [Token](#token)                                  |
-| `github-token`  | `${{ github.token }}`       | Lists the pull request's changed files and downloads the Nimzo CLI from GitHub Packages                                       |
+| `github-token`  | `${{ github.token }}`       | Token the action calls GitHub with, see [Permissions](#permissions)                                                           |
 | `nimzo-version` | `latest`                    | Tag of `ghcr.io/getnimzo/nimzo-cli` to run, or the digest (`sha256:…`) of its manifest                                        |
 
-The permissions are needed to read the checked-out code (`contents`), list the changed files and write the comment (`pull-requests`), create the `Nimzo policies` check (`checks`), and download the CLI (`packages`).
+### Permissions
+
+The `github-token` needs these permissions, set in the workflow's `permissions` block:
+
+- `contents: read`: to read the checked-out code.
+- `pull-requests: write`: to list the pull request's changed files and write the comment.
+- `checks: write`: to write the verdict, its summary and its annotations on the job's check run.
+- `actions: read`: to find the job's check run among the jobs of the workflow run. A private repository needs it; a public one lists its jobs to anyone. Without it, the action says so in the job log and leaves the annotations out, and still reports the verdict everywhere else.
+- `packages: read`: to download the Nimzo CLI from GitHub Packages.
 
 ### Verdict
 
-The `Nimzo policies` check concludes, the worst case first:
+The verdict concludes, the worst case first:
 
-| Conclusion | When                                                                                                                                                                     |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| ❌ failure | A blocking finding, or a folder or policy that could not be evaluated, stated plainly                                                                                    |
-| ⚠️ neutral | Only findings that do not block, or a folder whose Nimzo stack has no policy to apply: "No policies applied" (no bundle assigned, or no published policy in its bundles) |
-| ✅ success | No finding, the changed folders have no Nimzo stack, or the pull request changes no Terraform folder                                                                     |
+| Verdict    | Job      | When                                                                                                                                                                     |
+| ---------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ❌ failure | fails    | A blocking finding, or a folder or policy that could not be evaluated, stated plainly                                                                                    |
+| ⚠️ neutral | succeeds | Only findings that do not block, or a folder whose Nimzo stack has no policy to apply: "No policies applied" (no bundle assigned, or no published policy in its bundles) |
+| ✅ success | succeeds | No finding, the changed folders have no Nimzo stack, or the pull request changes no Terraform folder                                                                     |
 
-Which findings block follows the enforcement mode set in Nimzo for the folder's stack, or else for the organization: Critical and High findings by default, Medium ones too under "Errors and warnings", every finding under "All violations". The job fails with the check, so it can be required instead. The workflow's job itself stays green otherwise, since GitHub cannot show a job as neutral.
+GitHub cannot show a job as neutral, so a neutral verdict leaves the job green: its findings show as warnings in the comment, the annotations and the [`verdict` output](#verdict-output).
+
+Which findings block follows the enforcement mode set in Nimzo for the folder's stack, or else for the organization: Critical and High findings by default, Medium ones too under "Errors and warnings", every finding under "All violations".
 
 "Could not evaluate" names the cause plainly: Nimzo's error message, the reason of a task that failed (such as `POLICY` for a policy that crashed, or `TIMEOUT`), or that the `nimzo-token` is expired or invalid. An error Nimzo did not explain, such as an unreachable host or a proxy's page, shows only "Nimzo could not be reached or sent an unexpected response", and a task that failed for a reason other than `POLICY` or `INVALID_INPUT` shows only "Nimzo could not execute the evaluation" with its reason: re-run the job with debug logging to see the full error in the log. "No policies applied" is the one case that is not red: assign a bundle to the stack in Nimzo to check it.
 
-When the action cannot run at all, such as when the CLI cannot be downloaded, it still tries to create a failed `Nimzo policies` check with the error.
+When the action cannot run at all, such as when the CLI cannot be downloaded, the job fails with the error, which the action also writes on the job's check.
 
 A finding is the same from one commit to the next when its folder, policy, resource and message are the same: moving code to other lines, or rebasing the branch, keeps it. A finding of a folder that could not be evaluated on the latest commit is listed as not re-evaluated, rather than resolved.
 
 ### Required check
 
-In the repository's branch protection rule or ruleset, require the status check named **`Nimzo policies`**, after the action has run once. GitHub treats `neutral` as passing, so warnings never block. Do not name a workflow job `Nimzo policies`: two checks with the same name make the result ambiguous.
+In the repository's branch protection rule or ruleset, require the status check of the job that runs the action, after it has run once. The check is named after the job: its `name` (**`Evaluate policies`** in [Usage](#usage)), or else its id. Renaming the job renames the check, so update the rule with it. Warnings never block, since a neutral verdict leaves the job green.
 
 ### Verdict output
 
@@ -142,7 +155,7 @@ A folder is matched to the stack imported from `https://github.com/<owner>/<repo
 ## Current limits
 
 - The action runs on Linux x64 runners only.
-- Pull requests from forks and from Dependabot cannot be evaluated: GitHub gives them no secrets, so `nimzo-token` is empty, and a read-only token, so no comment nor check can be written. The job fails and says so.
+- Pull requests from forks and from Dependabot cannot be evaluated: GitHub gives them no secrets, so `nimzo-token` is empty, and a read-only token, so neither the comment nor the job's check can be written. The job fails and says so.
 - `nimzo-version` defaults to `latest`, which every change to the CLI republishes, so a new CLI reaches every workflow at once. To pin a CLI, set it to the manifest digest the `Publish package` run of `getnimzo/nimzo-cli` prints.
 
 ## Token

@@ -25357,26 +25357,48 @@ function hasTerraformFile(folder) {
 }
 
 // src/check-run.ts
-var VERDICT_CHECK_NAME = "Nimzo policies";
 var ANNOTATIONS_PER_REQUEST = 50;
-async function createVerdictCheckRun(octokit, repo, headSha, check) {
-  const [firstBatch = [], ...otherBatches] = splitInBatches(check.annotations, ANNOTATIONS_PER_REQUEST);
-  const output = { title: check.title, summary: check.summary };
-  const { data } = await octokit.rest.checks.create({
-    ...repo,
-    name: VERDICT_CHECK_NAME,
-    head_sha: headSha,
-    status: "completed",
-    conclusion: check.conclusion,
-    output: { ...output, annotations: firstBatch }
+async function findJobCheckRunId(octokit, workflowContext) {
+  let jobs;
+  try {
+    jobs = await listWorkflowRunAttemptJobs(octokit, workflowContext);
+  } catch (error2) {
+    throw new Error(
+      `Could not list the jobs of the workflow run to find this job's check run (the workflow needs actions: read): ${error2 instanceof Error ? error2.message : String(error2)}`
+    );
+  }
+  const runnerName = process.env["RUNNER_NAME"];
+  const matchingJobs = jobs.filter(
+    (candidate) => candidate.status !== "completed" && candidate.runner_name === runnerName
+  );
+  const [job, ...otherJobs] = matchingJobs;
+  if (job === void 0 || otherJobs.length > 0) {
+    throw new Error(
+      `Found ${matchingJobs.length} running jobs of runner "${runnerName ?? ""}" in the workflow run, expected one`
+    );
+  }
+  return job.id;
+}
+async function listWorkflowRunAttemptJobs(octokit, workflowContext) {
+  return octokit.paginate(octokit.rest.actions.listJobsForWorkflowRunAttempt, {
+    ...workflowContext.repo,
+    run_id: workflowContext.runId,
+    attempt_number: workflowContext.runAttempt,
+    per_page: 100
   });
-  for (const annotations of otherBatches) {
-    await octokit.rest.checks.update({ ...repo, check_run_id: data.id, output: { ...output, annotations } });
+}
+async function writeVerdictOnJobCheckRun(octokit, repo, jobCheckRunId, check) {
+  for (const annotations of splitInBatches(check.annotations, ANNOTATIONS_PER_REQUEST)) {
+    await octokit.rest.checks.update({
+      ...repo,
+      check_run_id: jobCheckRunId,
+      output: { title: check.title, summary: check.summary, annotations }
+    });
   }
 }
 function splitInBatches(items, size) {
   return Array.from(
-    { length: Math.ceil(items.length / size) },
+    { length: Math.max(1, Math.ceil(items.length / size)) },
     (_, index) => items.slice(index * size, (index + 1) * size)
   );
 }
@@ -26128,10 +26150,8 @@ async function run() {
     return;
   }
   setSecret(nimzoApiKey);
-  let headSha = null;
   try {
     const pullRequest = readPullRequestEvent();
-    headSha = pullRequest.head.sha;
     const nimzoUrl = getInput("nimzo-url", { required: true });
     const workspace = process.env["GITHUB_WORKSPACE"] ?? process.cwd();
     const report = await evaluateChangedFolders(octokit, githubToken, pullRequest, nimzoUrl, nimzoApiKey, workspace);
@@ -26150,8 +26170,7 @@ async function run() {
     if (existingComment !== null || verdict.conclusion !== "success") {
       await writeVerdictCommentUnlessOutdated(octokit, pullRequest, existingComment, content);
     }
-    await createVerdictCheckRun(octokit, context2.repo, pullRequest.head.sha, {
-      conclusion: verdict.conclusion,
+    await writeOnJobCheckRunUnlessForbidden(octokit, {
       title: verdict.title,
       summary: fitVerdictMarkdownInLimit(content, CHECK_SUMMARY_SIZE_LIMIT),
       annotations: buildFindingAnnotations(verdict, nimzoUrl)
@@ -26164,7 +26183,14 @@ async function run() {
   } catch (error2) {
     const message = error2 instanceof Error ? error2.message : String(error2);
     setFailed(message);
-    if (headSha !== null) await reportCouldNotEvaluateCheckRun(octokit, headSha, message);
+    await writeOnJobCheckRunUnlessForbidden(octokit, {
+      title: "Could not evaluate",
+      summary: `## \u274C Nimzo policies: Could not evaluate
+
+${message}
+`,
+      annotations: []
+    });
   }
 }
 async function evaluateChangedFolders(octokit, githubToken, pullRequest, nimzoUrl, nimzoApiKey, workspace) {
@@ -26206,20 +26232,13 @@ async function writeVerdictCommentUnlessOutdated(octokit, pullRequest, existingC
     );
   }
 }
-async function reportCouldNotEvaluateCheckRun(octokit, headSha, message) {
+async function writeOnJobCheckRunUnlessForbidden(octokit, output) {
   try {
-    await createVerdictCheckRun(octokit, context2.repo, headSha, {
-      conclusion: "failure",
-      title: "Could not evaluate",
-      summary: `## \u274C Nimzo policies: Could not evaluate
-
-${message}
-`,
-      annotations: []
-    });
+    const jobCheckRunId = await findJobCheckRunId(octokit, context2);
+    await writeVerdictOnJobCheckRun(octokit, context2.repo, jobCheckRunId, output);
   } catch (error2) {
-    warning(
-      `Could not create the Nimzo policies check run: ${error2 instanceof Error ? error2.message : String(error2)}`
+    info(
+      `Could not write the verdict on the job's check run: ${error2 instanceof Error ? error2.message : String(error2)}`
     );
   }
 }
