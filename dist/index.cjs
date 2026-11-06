@@ -26106,49 +26106,76 @@ function readFindingCommentKey(body) {
 }
 function planFindingComment(finding, context3) {
   if (finding.file === null) return null;
-  const diffLines = context3.diffLines.get(finding.file) ?? /* @__PURE__ */ new Set();
+  const diffLines = context3.diffLines.get(finding.file);
+  if (diffLines === void 0) return null;
   const fixes = finding.suggestedFixes ?? [];
+  const fixesInDiff = fixes.filter((fix) => isLineRangeInDiff(fix, context3.diffLines.get(fix.filePath)));
   const [onlyFix, ...otherFixes] = fixes;
-  if (onlyFix !== void 0 && otherFixes.length === 0 && onlyFix.filePath === finding.file && isLineRangeInDiff(onlyFix, diffLines)) {
+  if (onlyFix !== void 0 && otherFixes.length === 0 && onlyFix.filePath === finding.file && fixesInDiff.length > 0) {
     return {
       key: finding.key,
       path: finding.file,
       line: onlyFix.endLine,
       startLine: onlyFix.startLine < onlyFix.endLine ? onlyFix.startLine : null,
-      body: fitFindingCommentBody(finding, context3, { kind: "suggestion", fix: onlyFix })
+      body: fitFindingCommentBody(finding, context3, { kind: "suggestion", fix: onlyFix }, false)
     };
   }
-  if (finding.line === null || !diffLines.has(finding.line)) return null;
+  const line = findFindingLineInDiff(finding, diffLines);
   return {
     key: finding.key,
     path: finding.file,
-    line: finding.line,
+    line,
     startLine: null,
     body: fitFindingCommentBody(
       finding,
       context3,
-      fixes.length === 0 ? { kind: "none" } : { kind: "code-blocks", fixes }
+      fixesInDiff.length === 0 ? { kind: "none" } : { kind: "code-blocks", fixes: fixesInDiff },
+      line === null
     )
   };
 }
+function findFindingLineInDiff(finding, diffLines) {
+  if (finding.line !== null && diffLines.has(finding.line)) return finding.line;
+  const startLine = finding.resourceStartLine ?? null;
+  const endLine = finding.resourceEndLine ?? null;
+  if (startLine === null || endLine === null) return null;
+  for (let line = startLine; line <= endLine; line++) {
+    if (diffLines.has(line)) return line;
+  }
+  return null;
+}
 function isLineRangeInDiff(fix, diffLines) {
+  if (diffLines === void 0) return false;
   for (let line = fix.startLine; line <= fix.endLine; line++) {
     if (!diffLines.has(line)) return false;
   }
   return true;
 }
-function fitFindingCommentBody(finding, context3, fixSection) {
-  const full = buildFindingCommentBody(finding, context3, fixSection, { showFixes: true, showPrompt: true });
+function fitFindingCommentBody(finding, context3, fixSection, isOnWholeFile) {
+  const full = buildFindingCommentBody(finding, context3, fixSection, {
+    showFixes: true,
+    showPrompt: true,
+    showPosition: isOnWholeFile
+  });
   if (full.length <= COMMENT_SIZE_LIMIT) return full;
-  const withoutFixes = buildFindingCommentBody(finding, context3, fixSection, { showFixes: false, showPrompt: true });
+  const withoutFixes = buildFindingCommentBody(finding, context3, fixSection, {
+    showFixes: false,
+    showPrompt: true,
+    showPosition: isOnWholeFile
+  });
   if (withoutFixes.length <= COMMENT_SIZE_LIMIT) return withoutFixes;
-  return buildFindingCommentBody(finding, context3, fixSection, { showFixes: false, showPrompt: false });
+  return buildFindingCommentBody(finding, context3, fixSection, {
+    showFixes: false,
+    showPrompt: false,
+    showPosition: isOnWholeFile
+  });
 }
 function buildFindingCommentBody(finding, context3, fixSection, detail) {
   const folder = context3.folders.find((candidate) => candidate.path === finding.folder);
   const sections = [
     buildFindingCommentMarker(finding.key),
     buildFindingHeadline(finding, context3.appUrl),
+    detail.showPosition && finding.file !== null ? `At ${buildCodeSpan(buildFilePosition(finding.file, finding.line))}.` : null,
     `**Why this policy exists**
 
 ${finding.description}`,
@@ -26196,7 +26223,7 @@ ${buildFencedCodeBlock(prompt, "markdown")}
 function buildFixSection(fixSection, showFixes, auditUrl) {
   if (fixSection.kind === "none") return null;
   if (!showFixes) {
-    const pointer = auditUrl === null ? "The suggested fix is too long to show here." : `The suggested fix is too long to show here: [see it in Nimzo](${auditUrl}).`;
+    const pointer = auditUrl === null ? "The suggested fix is too large to be displayed." : `The suggested fix is too large to be displayed: [see it in Nimzo](${auditUrl}).`;
     return `**Suggested fix**
 
 ${pointer}`;
@@ -26238,6 +26265,7 @@ async function listFindingComments(octokit, repo, pullRequestNumber) {
         id: comment.id,
         key,
         path: comment.path,
+        isOnWholeFile: comment.subject_type === "file",
         line: comment.line ?? null,
         startLine: comment.start_line ?? null
       }
@@ -26262,24 +26290,29 @@ async function syncFindingComments(octokit, repo, pullRequestNumber, headSha, ex
   }
 }
 function isCommentAtPlannedPlace(comment, plan) {
-  return comment.path === plan.path && comment.line === plan.line && comment.startLine === plan.startLine;
+  if (comment.path !== plan.path) return false;
+  if (plan.line === null) return comment.isOnWholeFile;
+  return !comment.isOnWholeFile && comment.line === plan.line && comment.startLine === plan.startLine;
 }
 async function createFindingComment(octokit, repo, pullRequestNumber, headSha, plan) {
   try {
+    const place = plan.line === null ? { subject_type: "file" } : {
+      line: plan.line,
+      side: "RIGHT",
+      ...plan.startLine === null ? {} : { start_line: plan.startLine, start_side: "RIGHT" }
+    };
     await octokit.rest.pulls.createReviewComment({
       ...repo,
       pull_number: pullRequestNumber,
       commit_id: headSha,
       path: plan.path,
-      line: plan.line,
-      side: "RIGHT",
-      ...plan.startLine === null ? {} : { start_line: plan.startLine, start_side: "RIGHT" },
+      ...place,
       body: plan.body
     });
   } catch (error2) {
     if (!isUnprocessableRequest(error2)) throw error2;
     warning(
-      `GitHub refused the Nimzo comment on ${plan.path}:${plan.line}, so only the summary comment lists its finding: ${error2.message}`
+      `GitHub refused the Nimzo comment on ${buildFilePosition(plan.path, plan.line)}, so only the summary comment lists its finding: ${error2.message}`
     );
   }
 }
@@ -26334,7 +26367,7 @@ function listChangedTerraformFolders(files, workspace) {
 }
 function readDiffLines(files) {
   return new Map(
-    files.flatMap((file) => file.patch === void 0 ? [] : [[file.filename, readPatchLines(file.patch)]])
+    files.map((file) => [file.filename, file.patch === void 0 ? /* @__PURE__ */ new Set() : readPatchLines(file.patch)])
   );
 }
 function readPatchLines(patch) {
@@ -26443,8 +26476,8 @@ async function run() {
   try {
     const pullRequest = readPullRequestEvent();
     const nimzoUrl = getInput("nimzo-url", { required: true });
-    const enableAnnotations = getBooleanInput("enable-annotations");
     const enableComments = getBooleanInput("enable-comments");
+    const enableAnnotations = readEnableAnnotationsInput(enableComments);
     const timeoutSeconds = readTimeoutInput();
     const workspace = process.env["GITHUB_WORKSPACE"] ?? process.cwd();
     const files = await listPullRequestFiles(octokit, context2.repo, pullRequest);
@@ -26581,6 +26614,14 @@ async function writeOnJobCheckRunUnlessForbidden(octokit, output) {
 }
 function buildRepositoryUrl() {
   return `${context2.serverUrl}/${context2.repo.owner}/${context2.repo.repo}`;
+}
+function readEnableAnnotationsInput(enableComments) {
+  const enableAnnotations = getBooleanInput("enable-annotations");
+  if (enableAnnotations && enableComments) {
+    info("enable-comments is on, so the findings get review comments and no annotation");
+    return false;
+  }
+  return enableAnnotations;
 }
 function readTimeoutInput() {
   const value = getInput("timeout");

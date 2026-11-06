@@ -16,10 +16,10 @@ inputs:
     description: Version of the Nimzo CLI to download from ghcr.io/getnimzo/nimzo-cli, a tag or the digest of its manifest.
     default: latest
   enable-comments:
-    description: Whether to write one review comment per finding, on its line under Files changed, with the policy, a prompt for an AI assistant and the suggested fix, applied in one click when the fix's lines are in the diff. The summary comment is written either way.
+    description: Whether to write one review comment per finding of the changed files under Files changed, with the policy, a prompt for an AI assistant and the suggested fixes the diff shows, a single one applied in one click. The findings then get no annotation. The summary comment is written either way.
     default: "false"
   enable-annotations:
-    description: Whether to annotate each finding on its line on the job's check, and in the job when it has no location. Evaluation errors and skipped folders are annotated either way.
+    description: Whether to annotate each finding on its line on the job's check, and in the job when it has no location; ignored when enable-comments is true, which comments on the findings instead. Evaluation errors and skipped folders are annotated either way.
     default: "true"
   timeout:
     description: How many seconds the Nimzo CLI waits for each folder's evaluation, the suggestion of its fixes included, which can take up to 15 minutes. Unset, the CLI's own default applies (300).
