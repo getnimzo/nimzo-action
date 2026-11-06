@@ -6,7 +6,8 @@ For each folder of the pull request that holds a changed `*.tf`, `*.tf.json`, `*
 
 - **The verdict on the job's check**: the action writes it on the check run of the workflow job that runs it, rather than creating a check of its own, and fails the job when the verdict blocks. Mark the job's check as required to block merging (see [Required check](#required-check)).
 - **One pull request comment**, updated on every new commit, with one block per changed stack. An evaluated stack opens with a GitHub alert (caution for blocking findings, warning for warnings only, tip when everything passed) that gives the commit checked, the policies and bundles evaluated or how many findings blocked on the previous commit, and a link to its audit in Nimzo. A table lists each finding, blocking first: its policy, linked to Nimzo, its severity, and its file and line. Under it, each finding unfolds into why its policy exists, how to fix it, the rule's message and the offending snippet; blocking findings start unfolded. A stack with no policy to apply, or that could not be evaluated, gets a note: where to assign bundles, or the reason and the link to its audit. Findings that disappeared since an earlier commit are listed as resolved, with the commit that fixed them. A folder with no Nimzo stack gets no block. When the comment would exceed GitHub's size limit, it drops the details, then findings, and points to the job summary, which holds the full verdict. A first run with nothing to report leaves no comment.
-- An annotation on the offending line of each finding, on the job's check: a failure for Critical and High, a warning for Medium, a notice for Low, with the link to the policy in Nimzo. They show in the pull request's Checks tab and on their lines under Files changed. Every finding gets one: the check run takes them 50 per request, without the cap of 10 per level that annotations written from a step have. Errors, skipped folders and findings without a location are annotated from the step.
+- **A review comment on each finding**, when `enable-comments` is `true`, on its line under Files changed: the policy, linked to Nimzo, its severity and resource, why the policy exists, how to fix it, the rule's message, a prompt to copy for an AI assistant, and the fix Nimzo suggests. When the diff shows every line the fix replaces, the fix is a GitHub suggestion that **Commit suggestion** applies in one click; otherwise it shows as code blocks under their file and lines. Every new commit updates the comments, moves those whose lines moved, and deletes those of resolved findings. A finding on a line the diff does not show gets no review comment, and the pull request comment still lists it. Setting `enable-comments` back to `false` leaves the existing review comments in place. Nimzo evaluates the pull request merged into its base branch, so when the base branch also changed a file, a comment on it can sit a few lines off.
+- An annotation on the offending line of each finding, unless `enable-annotations` is `false`, on the job's check: a failure for Critical and High, a warning for Medium, a notice for Low, with the link to the policy in Nimzo. They show in the pull request's Checks tab and on their lines under Files changed. Every finding gets one: the check run takes them 50 per request, without the cap of 10 per level that annotations written from a step have. Errors, skipped folders and findings without a location are annotated from the step. With `enable-annotations: false`, the findings get no annotation, while errors and skipped folders still do; the comment, the job summary and the check's summary are unchanged.
 - **The job summary**, on the workflow run's page, with the full verdict.
 - The [`verdict` output](#verdict-output), for the workflow's next steps.
 
@@ -45,22 +46,29 @@ jobs:
           nimzo-token: ${{ secrets.NIMZO_TOKEN }}
 ```
 
-| Input           | Default                     | Description                                                                                                                   |
-| --------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `nimzo-url`     | `https://staging.nimzo.dev` | URL of Nimzo, without a path: the CLI calls the API under it, and the policy links in the comment and annotations point at it |
-| `nimzo-token`   | required                    | Organization API key (`ak_…`) the Nimzo CLI sends to the governance API, see [Token](#token)                                  |
-| `github-token`  | `${{ github.token }}`       | Token the action calls GitHub with, see [Permissions](#permissions)                                                           |
-| `nimzo-version` | `latest`                    | Tag of `ghcr.io/getnimzo/nimzo-cli` to run, or the digest (`sha256:…`) of its manifest                                        |
+| Input                | Default                     | Description                                                                                                                   |
+| -------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `nimzo-url`          | `https://staging.nimzo.dev` | URL of Nimzo, without a path: the CLI calls the API under it, and the policy links in the comment and annotations point at it |
+| `nimzo-token`        | required                    | Organization API key (`ak_…`) the Nimzo CLI sends to the governance API, see [Token](#token)                                  |
+| `github-token`       | `${{ github.token }}`       | Token the action calls GitHub with, see [Permissions](#permissions)                                                           |
+| `nimzo-version`      | `latest`                    | Tag of `ghcr.io/getnimzo/nimzo-cli` to run, or the digest (`sha256:…`) of its manifest                                        |
+| `enable-comments`    | `false`                     | Writes a review comment on each finding the diff shows, with the fix Nimzo suggests                                           |
+| `enable-annotations` | `true`                      | Annotates each finding on its line; `false` leaves the findings out of the annotations                                        |
+| `timeout`            | the CLI's (300)             | Seconds the CLI waits for the evaluation of each folder, see [Timeout](#timeout)                                              |
 
 ### Permissions
 
 The `github-token` needs these permissions, set in the workflow's `permissions` block:
 
 - `contents: read`: to read the checked-out code.
-- `pull-requests: write`: to list the pull request's changed files and write the comment.
+- `pull-requests: write`: to list the pull request's changed files, and write the comment and the review comments.
 - `checks: write`: to write the verdict, its summary and its annotations on the job's check run.
 - `actions: read`: to find the job's check run among the jobs of the workflow run. A private repository needs it; a public one lists its jobs to anyone. Without it, the action says so in the job log and leaves the annotations out, and still reports the verdict everywhere else.
 - `packages: read`: to download the Nimzo CLI from GitHub Packages.
+
+### Timeout
+
+An evaluation ends once Nimzo has suggested the fixes of its findings, which can take up to 15 minutes. The CLI waits 300 seconds for each folder by default, and a folder that takes longer is reported as "Could not evaluate". Set `timeout` to wait longer, such as `900`, and give the job a `timeout-minutes` above it.
 
 ### Verdict
 

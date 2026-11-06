@@ -21136,6 +21136,17 @@ function getInput(name, options) {
   }
   return val.trim();
 }
+function getBooleanInput(name, options) {
+  const trueValue = ["true", "True", "TRUE"];
+  const falseValue = ["false", "False", "FALSE"];
+  const val = getInput(name, options);
+  if (trueValue.includes(val))
+    return true;
+  if (falseValue.includes(val))
+    return false;
+  throw new TypeError(`Input does not meet YAML 1.2 "Core Schema" specification: ${name}
+Support boolean input list: \`true | True | TRUE | false | False | FALSE\``);
+}
 function setOutput(name, value) {
   const filePath = process.env["GITHUB_OUTPUT"] || "";
   if (filePath) {
@@ -25329,34 +25340,7 @@ function getOctokit(token, options, ...additionalPlugins) {
   return new GitHubWithPlugins(getOctokitOptions(token, options));
 }
 
-// src/changed-folders.ts
-var import_node_fs = require("node:fs");
-var import_node_path = require("node:path");
-var TERRAFORM_FILE_PATTERN = /\.(tf|tfvars)(\.json)?$/;
-async function listChangedTerraformFolders(octokit, repo, pullRequest, workspace) {
-  const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
-    ...repo,
-    pull_number: pullRequest.number,
-    per_page: 100
-  });
-  if (files.length < pullRequest.changed_files) {
-    throw new Error(
-      `The pull request changes ${pullRequest.changed_files} files and GitHub lists only ${files.length}: split it so that every Terraform folder is evaluated`
-    );
-  }
-  return selectTerraformFolders(files, (folder) => hasTerraformFile((0, import_node_path.join)(workspace, folder)));
-}
-function selectTerraformFolders(files, hasTerraformFileInFolder) {
-  const folders = files.flatMap((file) => [file.filename, file.previous_filename]).filter((path4) => path4 !== void 0 && TERRAFORM_FILE_PATTERN.test(path4)).map((path4) => import_node_path.posix.dirname(path4));
-  return [...new Set(folders)].filter(hasTerraformFileInFolder).sort();
-}
-function hasTerraformFile(folder) {
-  return (0, import_node_fs.existsSync)(folder) && (0, import_node_fs.readdirSync)(folder, { withFileTypes: true }).some(
-    (entry) => entry.isFile() && TERRAFORM_FILE_PATTERN.test(entry.name)
-  );
-}
-
-// src/check-run.ts
+// src/annotations/check-run.ts
 var ANNOTATIONS_PER_REQUEST = 50;
 async function findJobCheckRunId(octokit, workflowContext) {
   let jobs;
@@ -25403,154 +25387,11 @@ function splitInBatches(items, size) {
   );
 }
 
-// src/cli-download.ts
+// src/verdict/verdict.ts
 var import_node_crypto = require("node:crypto");
-var import_promises = require("node:fs/promises");
-var import_node_path2 = require("node:path");
-var CLI_REGISTRY = "ghcr.io";
-var CLI_REPOSITORY = "getnimzo/nimzo-cli";
-var CLI_FILE_NAME = "nimzo-cli";
-var OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
-async function downloadCli(version, githubToken, folder) {
-  if (process.platform !== "linux" || process.arch !== "x64") {
-    throw new Error(`The Nimzo CLI only runs on Linux x64 runners, not on ${process.platform} ${process.arch}`);
-  }
-  const registryToken = await fetchRegistryPullToken(githubToken);
-  const manifestResponse = await fetchFromRegistry(`manifests/${version}`, registryToken, OCI_MANIFEST_MEDIA_TYPE);
-  const manifestBytes = Buffer.from(await manifestResponse.arrayBuffer());
-  if (version.startsWith("sha256:") && computeSha256Digest(manifestBytes) !== version) {
-    throw new Error(`The manifest downloaded from ${describeCliArtifact(version)} does not match its digest`);
-  }
-  const manifest = JSON.parse(manifestBytes.toString("utf8"));
-  const layer = manifest.layers?.length === 1 ? manifest.layers[0] : void 0;
-  if (layer === void 0) {
-    throw new Error(`${describeCliArtifact(version)} must hold exactly one file, the CLI binary`);
-  }
-  const blobResponse = await fetchFromRegistry(`blobs/${layer.digest}`, registryToken);
-  const binary = Buffer.from(await blobResponse.arrayBuffer());
-  if (computeSha256Digest(binary) !== layer.digest) {
-    throw new Error(`The CLI downloaded from ${describeCliArtifact(version)} does not match its digest`);
-  }
-  await (0, import_promises.mkdir)(folder, { recursive: true });
-  const path4 = (0, import_node_path2.join)(folder, CLI_FILE_NAME);
-  await (0, import_promises.writeFile)(path4, binary);
-  await (0, import_promises.chmod)(path4, 493);
-  return path4;
-}
-function computeSha256Digest(bytes) {
-  return `sha256:${(0, import_node_crypto.createHash)("sha256").update(bytes).digest("hex")}`;
-}
-async function fetchRegistryPullToken(githubToken) {
-  const response = await fetch(
-    `https://${CLI_REGISTRY}/token?service=${CLI_REGISTRY}&scope=repository:${CLI_REPOSITORY}:pull`,
-    { headers: { Authorization: `Basic ${Buffer.from(`x:${githubToken}`).toString("base64")}` } }
-  );
-  assertRegistryResponseOk(response, "the registry token");
-  return (await response.json()).token;
-}
-async function fetchFromRegistry(path4, registryToken, accept) {
-  const response = await fetch(`https://${CLI_REGISTRY}/v2/${CLI_REPOSITORY}/${path4}`, {
-    headers: { Authorization: `Bearer ${registryToken}`, ...accept !== void 0 && { Accept: accept } }
-  });
-  assertRegistryResponseOk(response, path4);
-  return response;
-}
-function assertRegistryResponseOk(response, what) {
-  if (response.ok) return;
-  const accessHint = [401, 403, 404].includes(response.status) ? `: check that the workflow grants \`packages: read\` and that the package ${CLI_REGISTRY}/${CLI_REPOSITORY} gives this repository read access` : "";
-  throw new Error(`Cannot download ${what} of the Nimzo CLI (${response.status})${accessHint}`);
-}
-function describeCliArtifact(version) {
-  return `${CLI_REGISTRY}/${CLI_REPOSITORY}${version.startsWith("sha256:") ? "@" : ":"}${version}`;
-}
-
-// src/cli-run.ts
-var UNEXPECTED_ERROR_MESSAGE = "Nimzo could not be reached or sent an unexpected response. Please try again later.";
-var TASK_FAILURE_REASONS_WITH_SHOWN_MESSAGE = /* @__PURE__ */ new Set(["POLICY", "INVALID_INPUT"]);
-var TASK_NOT_EXECUTED_MESSAGE = "Nimzo could not execute the evaluation. Please try again later.";
-async function runCliEvaluation(cliPath, folders, settings) {
-  const output = await getExecOutput(
-    cliPath,
-    [
-      "evaluate",
-      "--format",
-      "json",
-      "--repository-url",
-      settings.repositoryUrl,
-      "--trigger",
-      "pull_request",
-      "--git-ref",
-      settings.pullRequest.gitRef,
-      "--commit-sha",
-      settings.pullRequest.commitSha,
-      "--pull-request-id",
-      settings.pullRequest.number,
-      ...folders
-    ],
-    {
-      cwd: settings.workspace,
-      env: {
-        ...readProcessEnv(),
-        NIMZO_API_URL: settings.nimzoUrl,
-        NIMZO_API_KEY: settings.nimzoApiKey
-      },
-      ignoreReturnCode: true,
-      // The JSON report stays out of the log; the CLI's progress on stderr is shown.
-      silent: true,
-      listeners: { stderr: (data) => process.stderr.write(data) }
-    }
-  );
-  return hideUnexpectedFolderErrors(parseCliReport(output.stdout, output.stderr, folders));
-}
-function hideUnexpectedFolderErrors(report) {
-  return {
-    folders: report.folders.map((folder) => {
-      const message = buildShownFolderErrorMessage(folder);
-      if (message === folder.message) return folder;
-      debug(`${folder.path}: ${folder.message ?? "no message"}`);
-      return { ...folder, message };
-    })
-  };
-}
-function buildShownFolderErrorMessage(folder) {
-  if (folder.outcome !== "error" || folder.errorCode !== null) return folder.message;
-  if (folder.taskFailureReason === null) return UNEXPECTED_ERROR_MESSAGE;
-  return TASK_FAILURE_REASONS_WITH_SHOWN_MESSAGE.has(folder.taskFailureReason) ? folder.message : TASK_NOT_EXECUTED_MESSAGE;
-}
-function parseCliReport(stdout, stderr, folders) {
-  const report = parseJsonOrNull(stdout);
-  if (!isCliEvaluationReport(report)) {
-    throw new Error(`The Nimzo CLI returned no report: ${stderr.trim() || stdout.trim() || "no output"}`);
-  }
-  const reportedFolders = report.folders.map((folder) => folder.path).sort();
-  if (reportedFolders.join("\n") !== [...folders].sort().join("\n")) {
-    throw new Error(
-      `The Nimzo CLI reported on ${reportedFolders.join(", ") || "no folder"} instead of the folders sent: ${folders.join(", ")}`
-    );
-  }
-  return report;
-}
-function parseJsonOrNull(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-function isCliEvaluationReport(value) {
-  return typeof value === "object" && value !== null && "folders" in value && Array.isArray(value.folders);
-}
-function readProcessEnv() {
-  return Object.fromEntries(
-    Object.entries(process.env).filter((entry) => entry[1] !== void 0)
-  );
-}
-
-// src/verdict.ts
-var import_node_crypto2 = require("node:crypto");
 var UNAUTHORIZED_ERROR_CODE = "GENERIC_UNAUTHORIZED";
 function buildFindingKey(folder, rule) {
-  return (0, import_node_crypto2.createHash)("sha256").update([folder, rule.policyId, rule.resourceId, rule.message].join("\0")).digest("hex").slice(0, 16);
+  return (0, import_node_crypto.createHash)("sha256").update([folder, rule.policyId, rule.resourceId, rule.message].join("\0")).digest("hex").slice(0, 16);
 }
 function buildVerdict(report, previousFindings, headSha) {
   const occurrencesByKey = /* @__PURE__ */ new Map();
@@ -25664,7 +25505,254 @@ function buildVerdictFolder(folder) {
   };
 }
 
-// src/verdict-comment.ts
+// src/annotations/finding-annotations.ts
+var ANNOTATION_LEVEL_BY_SEVERITY = {
+  Critical: "failure",
+  High: "failure",
+  Medium: "warning",
+  Low: "notice"
+};
+var ANNOTATE_JOB_BY_LEVEL = {
+  failure: error,
+  warning,
+  notice
+};
+function buildFindingAnnotations(verdict, appUrl) {
+  return verdict.openFindings.flatMap(
+    (finding) => finding.file === null || finding.line === null ? [] : [
+      {
+        path: finding.file,
+        start_line: finding.line,
+        end_line: finding.line,
+        annotation_level: ANNOTATION_LEVEL_BY_SEVERITY[finding.severity],
+        title: buildFindingAnnotationTitle(finding),
+        message: buildFindingAnnotationMessage(finding, appUrl)
+      }
+    ]
+  );
+}
+function annotateFindingsWithoutLocation(verdict, appUrl) {
+  for (const finding of verdict.openFindings.filter((open2) => open2.file === null || open2.line === null)) {
+    ANNOTATE_JOB_BY_LEVEL[ANNOTATION_LEVEL_BY_SEVERITY[finding.severity]](
+      buildFindingAnnotationMessage(finding, appUrl),
+      {
+        title: buildFindingAnnotationTitle(finding)
+      }
+    );
+  }
+}
+async function reportVerdictInJob(verdict, summaryMarkdown) {
+  for (const policyError of verdict.policyErrors) {
+    error(`${buildFolderLabel(policyError.folder)}: ${policyError.message}`, {
+      title: `Nimzo policy ${policyError.policyId} error: ${policyError.title}`
+    });
+  }
+  for (const folderError of verdict.folderErrors) {
+    error(`${buildFolderLabel(folderError.folder)}: ${describeFolderError(folderError)}`, {
+      title: "Nimzo could not evaluate a folder"
+    });
+  }
+  for (const noPolicyFolder of verdict.noPolicyFolders) {
+    notice(`${buildFolderLabel(noPolicyFolder.folder)}: ${noPolicyFolder.message}`, {
+      title: "Nimzo: no policies applied"
+    });
+  }
+  for (const skipped of verdict.skippedFolders) {
+    warning(`${buildFolderLabel(skipped.folder)}: ${skipped.message}`, { title: "Nimzo evaluation skipped" });
+  }
+  await summary.addRaw(summaryMarkdown).write();
+}
+function buildFindingAnnotationTitle(finding) {
+  return `${finding.severity} \xB7 ${finding.policyId}: ${finding.title}`;
+}
+function buildFindingAnnotationMessage(finding, appUrl) {
+  return `${finding.resourceId}: ${finding.message}
+
+Policy: ${buildPolicyUrl(appUrl, finding.policyId)}`;
+}
+
+// src/cli/download.ts
+var import_node_crypto2 = require("node:crypto");
+var import_promises = require("node:fs/promises");
+var import_node_path = require("node:path");
+var CLI_REGISTRY = "ghcr.io";
+var CLI_REPOSITORY = "getnimzo/nimzo-cli";
+var CLI_FILE_NAME = "nimzo-cli";
+var OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
+async function downloadCli(version, githubToken, folder) {
+  if (process.platform !== "linux" || process.arch !== "x64") {
+    throw new Error(`The Nimzo CLI only runs on Linux x64 runners, not on ${process.platform} ${process.arch}`);
+  }
+  const registryToken = await fetchRegistryPullToken(githubToken);
+  const manifestResponse = await fetchFromRegistry(`manifests/${version}`, registryToken, OCI_MANIFEST_MEDIA_TYPE);
+  const manifestBytes = Buffer.from(await manifestResponse.arrayBuffer());
+  if (version.startsWith("sha256:") && computeSha256Digest(manifestBytes) !== version) {
+    throw new Error(`The manifest downloaded from ${describeCliArtifact(version)} does not match its digest`);
+  }
+  const manifest = JSON.parse(manifestBytes.toString("utf8"));
+  const layer = manifest.layers?.length === 1 ? manifest.layers[0] : void 0;
+  if (layer === void 0) {
+    throw new Error(`${describeCliArtifact(version)} must hold exactly one file, the CLI binary`);
+  }
+  const blobResponse = await fetchFromRegistry(`blobs/${layer.digest}`, registryToken);
+  const binary = Buffer.from(await blobResponse.arrayBuffer());
+  if (computeSha256Digest(binary) !== layer.digest) {
+    throw new Error(`The CLI downloaded from ${describeCliArtifact(version)} does not match its digest`);
+  }
+  await (0, import_promises.mkdir)(folder, { recursive: true });
+  const path4 = (0, import_node_path.join)(folder, CLI_FILE_NAME);
+  await (0, import_promises.writeFile)(path4, binary);
+  await (0, import_promises.chmod)(path4, 493);
+  return path4;
+}
+function computeSha256Digest(bytes) {
+  return `sha256:${(0, import_node_crypto2.createHash)("sha256").update(bytes).digest("hex")}`;
+}
+async function fetchRegistryPullToken(githubToken) {
+  const response = await fetch(
+    `https://${CLI_REGISTRY}/token?service=${CLI_REGISTRY}&scope=repository:${CLI_REPOSITORY}:pull`,
+    { headers: { Authorization: `Basic ${Buffer.from(`x:${githubToken}`).toString("base64")}` } }
+  );
+  assertRegistryResponseOk(response, "the registry token");
+  return (await response.json()).token;
+}
+async function fetchFromRegistry(path4, registryToken, accept) {
+  const response = await fetch(`https://${CLI_REGISTRY}/v2/${CLI_REPOSITORY}/${path4}`, {
+    headers: { Authorization: `Bearer ${registryToken}`, ...accept !== void 0 && { Accept: accept } }
+  });
+  assertRegistryResponseOk(response, path4);
+  return response;
+}
+function assertRegistryResponseOk(response, what) {
+  if (response.ok) return;
+  const accessHint = [401, 403, 404].includes(response.status) ? `: check that the workflow grants \`packages: read\` and that the package ${CLI_REGISTRY}/${CLI_REPOSITORY} gives this repository read access` : "";
+  throw new Error(`Cannot download ${what} of the Nimzo CLI (${response.status})${accessHint}`);
+}
+function describeCliArtifact(version) {
+  return `${CLI_REGISTRY}/${CLI_REPOSITORY}${version.startsWith("sha256:") ? "@" : ":"}${version}`;
+}
+
+// src/cli/run.ts
+var UNEXPECTED_ERROR_MESSAGE = "Nimzo could not be reached or sent an unexpected response. Please try again later.";
+var TASK_FAILURE_REASONS_WITH_SHOWN_MESSAGE = /* @__PURE__ */ new Set(["POLICY", "INVALID_INPUT"]);
+var TASK_NOT_EXECUTED_MESSAGE = "Nimzo could not execute the evaluation. Please try again later.";
+async function runCliEvaluation(cliPath, folders, settings) {
+  const output = await getExecOutput(
+    cliPath,
+    [
+      "evaluate",
+      "--format",
+      "json",
+      "--repository-url",
+      settings.repositoryUrl,
+      "--trigger",
+      "pull_request",
+      "--git-ref",
+      settings.pullRequest.gitRef,
+      "--commit-sha",
+      settings.pullRequest.commitSha,
+      "--pull-request-id",
+      settings.pullRequest.number,
+      ...settings.timeoutSeconds === null ? [] : ["--timeout-seconds", String(settings.timeoutSeconds)],
+      ...folders
+    ],
+    {
+      cwd: settings.workspace,
+      env: {
+        ...readProcessEnv(),
+        NIMZO_API_URL: settings.nimzoUrl,
+        NIMZO_API_KEY: settings.nimzoApiKey
+      },
+      ignoreReturnCode: true,
+      // The JSON report stays out of the log; the CLI's progress on stderr is shown.
+      silent: true,
+      listeners: { stderr: (data) => process.stderr.write(data) }
+    }
+  );
+  return hideUnexpectedFolderErrors(parseCliReport(output.stdout, output.stderr, folders));
+}
+function hideUnexpectedFolderErrors(report) {
+  return {
+    folders: report.folders.map((folder) => {
+      const message = buildShownFolderErrorMessage(folder);
+      if (message === folder.message) return folder;
+      debug(`${folder.path}: ${folder.message ?? "no message"}`);
+      return { ...folder, message };
+    })
+  };
+}
+function buildShownFolderErrorMessage(folder) {
+  if (folder.outcome !== "error" || folder.errorCode !== null) return folder.message;
+  if (folder.taskFailureReason === null) return UNEXPECTED_ERROR_MESSAGE;
+  return TASK_FAILURE_REASONS_WITH_SHOWN_MESSAGE.has(folder.taskFailureReason) ? folder.message : TASK_NOT_EXECUTED_MESSAGE;
+}
+function parseCliReport(stdout, stderr, folders) {
+  const report = parseJsonOrNull(stdout);
+  if (!isCliEvaluationReport(report)) {
+    throw new Error(`The Nimzo CLI returned no report: ${stderr.trim() || stdout.trim() || "no output"}`);
+  }
+  const reportedFolders = report.folders.map((folder) => folder.path).sort();
+  if (reportedFolders.join("\n") !== [...folders].sort().join("\n")) {
+    throw new Error(
+      `The Nimzo CLI reported on ${reportedFolders.join(", ") || "no folder"} instead of the folders sent: ${folders.join(", ")}`
+    );
+  }
+  return report;
+}
+function parseJsonOrNull(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+function isCliEvaluationReport(value) {
+  return typeof value === "object" && value !== null && "folders" in value && Array.isArray(value.folders);
+}
+function readProcessEnv() {
+  return Object.fromEntries(
+    Object.entries(process.env).filter((entry) => entry[1] !== void 0)
+  );
+}
+
+// ../../lib/contract/src/governance/remediation-prompt.ts
+function buildRemediationPrompt({
+  publicId,
+  metadata,
+  remediation,
+  context: context3,
+  failingResources
+}) {
+  const references = Object.values(metadata.references ?? {}).flat();
+  const where = context3.filter(Boolean).join(" \xB7 ");
+  return [
+    "Fix the Terraform resources listed below (addresses and locations) so they comply with this governance policy. Change only what the policy requires, and keep the existing style.",
+    "If you need the contents of a file to do so, ask me for it.",
+    "",
+    "## Policy",
+    `- ID: ${publicId}`,
+    `- Title: ${metadata.title}`,
+    `- Severity: ${metadata.severity}`,
+    ...metadata.category ? [`- Category: ${metadata.category}`] : [],
+    ...metadata.kind ? [`- Kind: ${metadata.kind}`] : [],
+    `- Description: ${metadata.description}`,
+    "",
+    "## Remediation",
+    remediation,
+    ...references.length > 0 ? ["", "## References", ...references.map(({ title, url }) => `- ${title}: ${url}`)] : [],
+    ...where ? ["", "## Audited code", where] : [],
+    "",
+    `## Failing resources (${failingResources.length})`,
+    ...failingResources.flatMap(({ resource, location, attribute, attributeLocation, message }, index) => [
+      `${index + 1}. \`${resource}\``,
+      ...location ? [`   - Declared at: ${location}`] : [],
+      ...attribute ? [`   - Attribute at fault: ${attribute}${attributeLocation ? ` (${attributeLocation})` : ""}`] : [],
+      ...message ? [`   - Finding: ${message}`] : []
+    ])
+  ].join("\n");
+}
+
+// src/comments/summary-markdown.ts
 var VERDICT_COMMENT_MARKER = "<!-- nimzo-verdict -->";
 var COMMENT_SIZE_LIMIT = 6e4;
 var CHECK_SUMMARY_SIZE_LIMIT = 65e3;
@@ -25891,8 +25979,12 @@ function buildFilePosition(file, line) {
 }
 function buildSnippetMarkdown(snippet) {
   const code = snippet.lines.map((line) => line.trimEnd()).join("\n").replaceAll(/^\n+|\n+$/g, "");
+  return buildFencedCodeBlock(code, "hcl");
+}
+function buildFencedCodeBlock(code, language) {
   const fence = "`".repeat(Math.max(3, longestBacktickRun(code) + 1));
-  return `${fence}hcl
+  return code === "" ? `${fence}${language}
+${fence}` : `${fence}${language}
 ${code}
 ${fence}`;
 }
@@ -26003,7 +26095,199 @@ function longestBacktickRun(text) {
   return Math.max(0, ...(text.match(/`+/g) ?? []).map((run2) => run2.length));
 }
 
-// src/pull-request-comment.ts
+// src/comments/finding-comment.ts
+var FINDING_COMMENT_MARKER_PATTERN = /<!-- nimzo-finding (\S+) -->/;
+var FOOTER2 = "<sub>Nimzo updates this comment on every push, and deletes it once the finding is resolved.</sub>";
+function buildFindingCommentMarker(key) {
+  return `<!-- nimzo-finding ${key} -->`;
+}
+function readFindingCommentKey(body) {
+  return FINDING_COMMENT_MARKER_PATTERN.exec(body)?.[1] ?? null;
+}
+function planFindingComment(finding, context3) {
+  if (finding.file === null) return null;
+  const diffLines = context3.diffLines.get(finding.file) ?? /* @__PURE__ */ new Set();
+  const fixes = finding.suggestedFixes ?? [];
+  const [onlyFix, ...otherFixes] = fixes;
+  if (onlyFix !== void 0 && otherFixes.length === 0 && onlyFix.filePath === finding.file && isLineRangeInDiff(onlyFix, diffLines)) {
+    return {
+      key: finding.key,
+      path: finding.file,
+      line: onlyFix.endLine,
+      startLine: onlyFix.startLine < onlyFix.endLine ? onlyFix.startLine : null,
+      body: fitFindingCommentBody(finding, context3, { kind: "suggestion", fix: onlyFix })
+    };
+  }
+  if (finding.line === null || !diffLines.has(finding.line)) return null;
+  return {
+    key: finding.key,
+    path: finding.file,
+    line: finding.line,
+    startLine: null,
+    body: fitFindingCommentBody(
+      finding,
+      context3,
+      fixes.length === 0 ? { kind: "none" } : { kind: "code-blocks", fixes }
+    )
+  };
+}
+function isLineRangeInDiff(fix, diffLines) {
+  for (let line = fix.startLine; line <= fix.endLine; line++) {
+    if (!diffLines.has(line)) return false;
+  }
+  return true;
+}
+function fitFindingCommentBody(finding, context3, fixSection) {
+  const full = buildFindingCommentBody(finding, context3, fixSection, { showFixes: true, showPrompt: true });
+  if (full.length <= COMMENT_SIZE_LIMIT) return full;
+  const withoutFixes = buildFindingCommentBody(finding, context3, fixSection, { showFixes: false, showPrompt: true });
+  if (withoutFixes.length <= COMMENT_SIZE_LIMIT) return withoutFixes;
+  return buildFindingCommentBody(finding, context3, fixSection, { showFixes: false, showPrompt: false });
+}
+function buildFindingCommentBody(finding, context3, fixSection, detail) {
+  const folder = context3.folders.find((candidate) => candidate.path === finding.folder);
+  const sections = [
+    buildFindingCommentMarker(finding.key),
+    buildFindingHeadline(finding, context3.appUrl),
+    `**Why this policy exists**
+
+${finding.description}`,
+    finding.remediation === null ? null : `**How to fix**
+
+${finding.remediation}`,
+    `> ${finding.message.replaceAll(/\r?\n/g, " ")}`,
+    detail.showPrompt ? buildPromptSection(finding, context3, folder?.stackName ?? null) : null,
+    buildFixSection(fixSection, detail.showFixes, folder?.url ?? null),
+    FOOTER2
+  ];
+  return sections.filter((section) => section !== null).join("\n\n");
+}
+function buildFindingHeadline(finding, appUrl) {
+  return [
+    `${buildFindingIcon(finding)} **[${finding.title}](${buildPolicyUrl(appUrl, finding.policyId)})**`,
+    buildCodeSpan(finding.policyId),
+    buildSeverityLabel(finding),
+    buildCodeSpan(finding.resourceId)
+  ].join(" \xB7 ");
+}
+function buildPromptSection(finding, context3, stackName) {
+  const prompt = buildRemediationPrompt({
+    publicId: finding.policyId,
+    metadata: { title: finding.title, description: finding.description, severity: finding.severity },
+    remediation: finding.remediation ?? "",
+    context: [stackName ?? void 0, void 0, `${context3.gitRef} at ${context3.headSha.slice(0, 7)}`],
+    failingResources: [
+      {
+        resource: finding.resourceId,
+        location: finding.file === null ? null : buildFilePosition(finding.file, finding.line),
+        attribute: null,
+        attributeLocation: null,
+        message: finding.message
+      }
+    ]
+  });
+  return `<details>
+<summary>Prompt for an AI assistant</summary>
+
+${buildFencedCodeBlock(prompt, "markdown")}
+
+</details>`;
+}
+function buildFixSection(fixSection, showFixes, auditUrl) {
+  if (fixSection.kind === "none") return null;
+  if (!showFixes) {
+    const pointer = auditUrl === null ? "The suggested fix is too long to show here." : `The suggested fix is too long to show here: [see it in Nimzo](${auditUrl}).`;
+    return `**Suggested fix**
+
+${pointer}`;
+  }
+  if (fixSection.kind === "suggestion") {
+    return `**Suggested fix**
+
+${buildFencedCodeBlock(removeFinalLineEnding(fixSection.fix.replacementCode), "suggestion")}`;
+  }
+  const blocks = fixSection.fixes.map(
+    (fix) => `${buildCodeSpan(buildFixLineRange(fix))}
+
+${fix.replacementCode === "" ? "Delete these lines." : buildFencedCodeBlock(removeFinalLineEnding(fix.replacementCode), "hcl")}`
+  );
+  return `**Suggested fix**
+
+${blocks.join("\n\n")}`;
+}
+function buildFixLineRange(fix) {
+  const lines = fix.startLine === fix.endLine ? `${fix.startLine}` : `${fix.startLine}-${fix.endLine}`;
+  return `${fix.filePath}:${lines}`;
+}
+function removeFinalLineEnding(code) {
+  return code.replace(/\r?\n$/, "");
+}
+
+// src/comments/review-comments.ts
+var UNPROCESSABLE_STATUS = 422;
+async function listFindingComments(octokit, repo, pullRequestNumber) {
+  const comments = await octokit.paginate(octokit.rest.pulls.listReviewComments, {
+    ...repo,
+    pull_number: pullRequestNumber,
+    per_page: 100
+  });
+  return comments.flatMap((comment) => {
+    const key = comment.user?.type === "Bot" ? readFindingCommentKey(comment.body) : null;
+    return key === null ? [] : [
+      {
+        id: comment.id,
+        key,
+        path: comment.path,
+        line: comment.line ?? null,
+        startLine: comment.start_line ?? null
+      }
+    ];
+  });
+}
+async function syncFindingComments(octokit, repo, pullRequestNumber, headSha, existingComments, plans, staleKeys) {
+  const plansByKey = new Map(plans.map((plan) => [plan.key, plan]));
+  const updatedKeys = /* @__PURE__ */ new Set();
+  for (const comment of existingComments) {
+    if (staleKeys.has(comment.key)) continue;
+    const plan = plansByKey.get(comment.key);
+    if (plan !== void 0 && !updatedKeys.has(plan.key) && isCommentAtPlannedPlace(comment, plan)) {
+      await octokit.rest.pulls.updateReviewComment({ ...repo, comment_id: comment.id, body: plan.body });
+      updatedKeys.add(plan.key);
+    } else {
+      await octokit.rest.pulls.deleteReviewComment({ ...repo, comment_id: comment.id });
+    }
+  }
+  for (const plan of plans.filter((candidate) => !updatedKeys.has(candidate.key))) {
+    await createFindingComment(octokit, repo, pullRequestNumber, headSha, plan);
+  }
+}
+function isCommentAtPlannedPlace(comment, plan) {
+  return comment.path === plan.path && comment.line === plan.line && comment.startLine === plan.startLine;
+}
+async function createFindingComment(octokit, repo, pullRequestNumber, headSha, plan) {
+  try {
+    await octokit.rest.pulls.createReviewComment({
+      ...repo,
+      pull_number: pullRequestNumber,
+      commit_id: headSha,
+      path: plan.path,
+      line: plan.line,
+      side: "RIGHT",
+      ...plan.startLine === null ? {} : { start_line: plan.startLine, start_side: "RIGHT" },
+      body: plan.body
+    });
+  } catch (error2) {
+    if (!isUnprocessableRequest(error2)) throw error2;
+    warning(
+      `GitHub refused the Nimzo comment on ${plan.path}:${plan.line}, so only the summary comment lists its finding: ${error2.message}`
+    );
+  }
+}
+function isUnprocessableRequest(error2) {
+  return error2 instanceof Error && "status" in error2 && error2.status === UNPROCESSABLE_STATUS;
+}
+
+// src/comments/summary-comment.ts
 async function findVerdictComment(octokit, repo, pullRequestNumber) {
   const comments = await octokit.paginate(octokit.rest.issues.listComments, {
     ...repo,
@@ -26027,71 +26311,58 @@ async function writeVerdictComment(octokit, repo, pullRequestNumber, existingCom
   }
 }
 
-// src/report.ts
-var ANNOTATION_LEVEL_BY_SEVERITY = {
-  Critical: "failure",
-  High: "failure",
-  Medium: "warning",
-  Low: "notice"
-};
-var ANNOTATE_JOB_BY_LEVEL = {
-  failure: error,
-  warning,
-  notice
-};
-function buildFindingAnnotations(verdict, appUrl) {
-  return verdict.openFindings.flatMap(
-    (finding) => finding.file === null || finding.line === null ? [] : [
-      {
-        path: finding.file,
-        start_line: finding.line,
-        end_line: finding.line,
-        annotation_level: ANNOTATION_LEVEL_BY_SEVERITY[finding.severity],
-        title: buildFindingAnnotationTitle(finding),
-        message: buildFindingAnnotationMessage(finding, appUrl)
-      }
-    ]
-  );
-}
-async function reportVerdictInJob(verdict, appUrl, summaryMarkdown) {
-  for (const finding of verdict.openFindings.filter((open2) => open2.file === null || open2.line === null)) {
-    ANNOTATE_JOB_BY_LEVEL[ANNOTATION_LEVEL_BY_SEVERITY[finding.severity]](
-      buildFindingAnnotationMessage(finding, appUrl),
-      {
-        title: buildFindingAnnotationTitle(finding)
-      }
+// src/pull-request/changed-files.ts
+var import_node_fs = require("node:fs");
+var import_node_path2 = require("node:path");
+var TERRAFORM_FILE_PATTERN = /\.(tf|tfvars)(\.json)?$/;
+var HUNK_HEADER_PATTERN = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+async function listPullRequestFiles(octokit, repo, pullRequest) {
+  const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
+    ...repo,
+    pull_number: pullRequest.number,
+    per_page: 100
+  });
+  if (files.length < pullRequest.changed_files) {
+    throw new Error(
+      `The pull request changes ${pullRequest.changed_files} files and GitHub lists only ${files.length}: split it so that every Terraform folder is evaluated`
     );
   }
-  for (const policyError of verdict.policyErrors) {
-    error(`${buildFolderLabel(policyError.folder)}: ${policyError.message}`, {
-      title: `Nimzo policy ${policyError.policyId} error: ${policyError.title}`
-    });
-  }
-  for (const folderError of verdict.folderErrors) {
-    error(`${buildFolderLabel(folderError.folder)}: ${describeFolderError(folderError)}`, {
-      title: "Nimzo could not evaluate a folder"
-    });
-  }
-  for (const noPolicyFolder of verdict.noPolicyFolders) {
-    notice(`${buildFolderLabel(noPolicyFolder.folder)}: ${noPolicyFolder.message}`, {
-      title: "Nimzo: no policies applied"
-    });
-  }
-  for (const skipped of verdict.skippedFolders) {
-    warning(`${buildFolderLabel(skipped.folder)}: ${skipped.message}`, { title: "Nimzo evaluation skipped" });
-  }
-  await summary.addRaw(summaryMarkdown).write();
+  return files;
 }
-function buildFindingAnnotationTitle(finding) {
-  return `${finding.severity} \xB7 ${finding.policyId}: ${finding.title}`;
+function listChangedTerraformFolders(files, workspace) {
+  return selectTerraformFolders(files, (folder) => hasTerraformFile((0, import_node_path2.join)(workspace, folder)));
 }
-function buildFindingAnnotationMessage(finding, appUrl) {
-  return `${finding.resourceId}: ${finding.message}
+function readDiffLines(files) {
+  return new Map(
+    files.flatMap((file) => file.patch === void 0 ? [] : [[file.filename, readPatchLines(file.patch)]])
+  );
+}
+function readPatchLines(patch) {
+  const lines = /* @__PURE__ */ new Set();
+  let next = 0;
+  for (const line of patch.split("\n")) {
+    const hunk = HUNK_HEADER_PATTERN.exec(line);
+    if (hunk !== null) {
+      next = Number(hunk[1]);
+      continue;
+    }
+    if (line.startsWith("-") || line.startsWith("\\")) continue;
+    lines.add(next);
+    next++;
+  }
+  return lines;
+}
+function selectTerraformFolders(files, hasTerraformFileInFolder) {
+  const folders = files.flatMap((file) => [file.filename, file.previous_filename]).filter((path4) => path4 !== void 0 && TERRAFORM_FILE_PATTERN.test(path4)).map((path4) => import_node_path2.posix.dirname(path4));
+  return [...new Set(folders)].filter(hasTerraformFileInFolder).sort();
+}
+function hasTerraformFile(folder) {
+  return (0, import_node_fs.existsSync)(folder) && (0, import_node_fs.readdirSync)(folder, { withFileTypes: true }).some(
+    (entry) => entry.isFile() && TERRAFORM_FILE_PATTERN.test(entry.name)
+  );
+}
 
-Policy: ${buildPolicyUrl(appUrl, finding.policyId)}`;
-}
-
-// src/source-snippet.ts
+// src/pull-request/source-snippet.ts
 var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 var SNIPPET_CONTEXT_LINES = 2;
@@ -26117,7 +26388,7 @@ function readFindingSnippets(workspace, findings) {
   return snippets;
 }
 
-// src/verdict-output.ts
+// src/verdict/output.ts
 function buildVerdictOutput(verdict, report) {
   return {
     conclusion: verdict.conclusion,
@@ -26130,9 +26401,28 @@ function buildVerdictOutput(verdict, report) {
       errorCode,
       taskFailureReason
     })),
-    findings: verdict.openFindings,
+    findings: verdict.openFindings.map(selectOutputFindingFields),
     staleFindings: verdict.staleFindings.map(withoutStatus),
     resolvedFindings: verdict.resolvedFindings.map(withoutStatus)
+  };
+}
+function selectOutputFindingFields(finding) {
+  const { key, folder, blocking, policyId, title, description, severity, remediation } = finding;
+  const { resourceType, resourceId, message, file, line } = finding;
+  return {
+    key,
+    folder,
+    blocking,
+    policyId,
+    title,
+    description,
+    severity,
+    remediation,
+    resourceType,
+    resourceId,
+    message,
+    file,
+    line
   };
 }
 function withoutStatus({ status: _status, ...finding }) {
@@ -26153,8 +26443,18 @@ async function run() {
   try {
     const pullRequest = readPullRequestEvent();
     const nimzoUrl = getInput("nimzo-url", { required: true });
+    const enableAnnotations = getBooleanInput("enable-annotations");
+    const enableComments = getBooleanInput("enable-comments");
+    const timeoutSeconds = readTimeoutInput();
     const workspace = process.env["GITHUB_WORKSPACE"] ?? process.cwd();
-    const report = await evaluateChangedFolders(octokit, githubToken, pullRequest, nimzoUrl, nimzoApiKey, workspace);
+    const files = await listPullRequestFiles(octokit, context2.repo, pullRequest);
+    const report = await evaluateChangedFolders(
+      listChangedTerraformFolders(files, workspace),
+      githubToken,
+      pullRequest,
+      { nimzoUrl, nimzoApiKey, timeoutSeconds },
+      workspace
+    );
     const existingComment = await findVerdictComment(octokit, context2.repo, pullRequest.number);
     const previousState = existingComment === null ? { headSha: null, findings: [] } : readVerdictState(existingComment.body);
     const verdict = buildVerdict(report, previousState.findings, pullRequest.head.sha);
@@ -26166,14 +26466,26 @@ async function run() {
       headSha: pullRequest.head.sha,
       previousState
     };
-    await reportVerdictInJob(verdict, nimzoUrl, buildVerdictMarkdown(content));
-    if (existingComment !== null || verdict.conclusion !== "success") {
-      await writeVerdictCommentUnlessOutdated(octokit, pullRequest, existingComment, content);
+    if (enableAnnotations) annotateFindingsWithoutLocation(verdict, nimzoUrl);
+    await reportVerdictInJob(verdict, buildVerdictMarkdown(content));
+    if (await isEvaluatedCommitStillPullRequestHead(octokit, pullRequest)) {
+      if (existingComment !== null || verdict.conclusion !== "success") {
+        await writeVerdictCommentUnlessForbidden(octokit, pullRequest, existingComment, content);
+      }
+      if (enableComments) {
+        await syncFindingCommentsUnlessForbidden(octokit, pullRequest, verdict, {
+          appUrl: nimzoUrl,
+          gitRef: pullRequest.head.ref,
+          headSha: pullRequest.head.sha,
+          folders: verdict.folders,
+          diffLines: readDiffLines(files)
+        });
+      }
     }
     await writeOnJobCheckRunUnlessForbidden(octokit, {
       title: verdict.title,
       summary: fitVerdictMarkdownInLimit(content, CHECK_SUMMARY_SIZE_LIMIT),
-      annotations: buildFindingAnnotations(verdict, nimzoUrl)
+      annotations: enableAnnotations ? buildFindingAnnotations(verdict, nimzoUrl) : []
     });
     setOutput("verdict", JSON.stringify(buildVerdictOutput(verdict, report)));
     if (verdict.conclusion === "failure") {
@@ -26193,8 +26505,7 @@ ${message}
     });
   }
 }
-async function evaluateChangedFolders(octokit, githubToken, pullRequest, nimzoUrl, nimzoApiKey, workspace) {
-  const folders = await listChangedTerraformFolders(octokit, context2.repo, pullRequest, workspace);
+async function evaluateChangedFolders(folders, githubToken, pullRequest, nimzo, workspace) {
   if (folders.length === 0) {
     info("No Terraform change in this pull request");
     return { folders: [] };
@@ -26206,19 +26517,26 @@ async function evaluateChangedFolders(octokit, githubToken, pullRequest, nimzoUr
     (0, import_node_path4.join)(process.env["RUNNER_TEMP"] ?? workspace, "nimzo-cli")
   );
   return runCliEvaluation(cliPath, folders, {
-    nimzoUrl,
-    nimzoApiKey,
+    ...nimzo,
     repositoryUrl: buildRepositoryUrl(),
     pullRequest: { number: String(pullRequest.number), gitRef: pullRequest.head.ref, commitSha: context2.sha },
     workspace
   });
 }
-async function writeVerdictCommentUnlessOutdated(octokit, pullRequest, existingComment, content) {
+async function isEvaluatedCommitStillPullRequestHead(octokit, pullRequest) {
   try {
-    if (!await isPullRequestHeadUnchanged(octokit, context2.repo, pullRequest.number, pullRequest.head.sha)) {
-      info("A newer commit was pushed to the pull request: its run updates the comment");
-      return;
-    }
+    if (await isPullRequestHeadUnchanged(octokit, context2.repo, pullRequest.number, pullRequest.head.sha)) return true;
+    info("A newer commit was pushed to the pull request: its run updates the comments");
+    return false;
+  } catch (error2) {
+    warning(
+      `Could not tell whether a newer commit was pushed to the pull request, so the Nimzo comments are left as they are: ${error2 instanceof Error ? error2.message : String(error2)}`
+    );
+    return false;
+  }
+}
+async function writeVerdictCommentUnlessForbidden(octokit, pullRequest, existingComment, content) {
+  try {
     await writeVerdictComment(
       octokit,
       context2.repo,
@@ -26229,6 +26547,25 @@ async function writeVerdictCommentUnlessOutdated(octokit, pullRequest, existingC
   } catch (error2) {
     warning(
       `Could not write the Nimzo pull request comment (the workflow needs pull-requests: write): ${error2 instanceof Error ? error2.message : String(error2)}`
+    );
+  }
+}
+async function syncFindingCommentsUnlessForbidden(octokit, pullRequest, verdict, commentContext) {
+  try {
+    const existingComments = await listFindingComments(octokit, context2.repo, pullRequest.number);
+    const plans = verdict.openFindings.flatMap((finding) => planFindingComment(finding, commentContext) ?? []);
+    await syncFindingComments(
+      octokit,
+      context2.repo,
+      pullRequest.number,
+      pullRequest.head.sha,
+      existingComments,
+      plans,
+      new Set(verdict.staleFindings.map((finding) => finding.key))
+    );
+  } catch (error2) {
+    warning(
+      `Could not write the Nimzo review comments (the workflow needs pull-requests: write): ${error2 instanceof Error ? error2.message : String(error2)}`
     );
   }
 }
@@ -26244,6 +26581,15 @@ async function writeOnJobCheckRunUnlessForbidden(octokit, output) {
 }
 function buildRepositoryUrl() {
   return `${context2.serverUrl}/${context2.repo.owner}/${context2.repo.repo}`;
+}
+function readTimeoutInput() {
+  const value = getInput("timeout");
+  if (value === "") return null;
+  const seconds = Number(value);
+  if (!Number.isInteger(seconds) || seconds <= 0) {
+    throw new Error(`The timeout input must be a positive whole number of seconds, not "${value}"`);
+  }
+  return seconds;
 }
 function readPullRequestEvent() {
   if (context2.payload.pull_request === void 0) {
