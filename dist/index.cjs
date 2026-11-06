@@ -25726,8 +25726,13 @@ function buildRemediationPrompt({
   const references = Object.values(metadata.references ?? {}).flat();
   const where = context3.filter(Boolean).join(" \xB7 ");
   return [
-    "Fix the Terraform resources listed below (addresses and locations) so they comply with this governance policy. Change only what the policy requires, and keep the existing style.",
-    "If you need the contents of a file to do so, ask me for it.",
+    "Fix the Terraform resources listed below so they comply with this governance policy.",
+    "",
+    "- Read the files at the locations below. If you cannot open them, ask me to paste them.",
+    "- Change only what the policy requires, and keep the existing style and names.",
+    "- If a value comes from a variable, a local or a module input, fix it where it is set, and tell me if other resources use it.",
+    "- Do not silence the policy with an ignore comment or an exception: fix the configuration.",
+    "- Tell me if the change forces Terraform to replace a resource, or needs a new resource such as a KMS key.",
     "",
     "## Policy",
     `- ID: ${publicId}`,
@@ -25735,10 +25740,8 @@ function buildRemediationPrompt({
     `- Severity: ${metadata.severity}`,
     ...metadata.category ? [`- Category: ${metadata.category}`] : [],
     ...metadata.kind ? [`- Kind: ${metadata.kind}`] : [],
-    `- Description: ${metadata.description}`,
-    "",
-    "## Remediation",
-    remediation,
+    `- Why it exists: ${metadata.description}`,
+    ...remediation ? ["", "## How to fix", remediation] : [],
     ...references.length > 0 ? ["", "## References", ...references.map(({ title, url }) => `- ${title}: ${url}`)] : [],
     ...where ? ["", "## Audited code", where] : [],
     "",
@@ -25746,7 +25749,7 @@ function buildRemediationPrompt({
     ...failingResources.flatMap(({ resource, location, attribute, attributeLocation, message }, index) => [
       `${index + 1}. \`${resource}\``,
       ...location ? [`   - Declared at: ${location}`] : [],
-      ...attribute ? [`   - Attribute at fault: ${attribute}${attributeLocation ? ` (${attributeLocation})` : ""}`] : [],
+      ...attribute ? [`   - Failing on: ${attribute}${attributeLocation ? ` (${attributeLocation})` : ""}`] : [],
       ...message ? [`   - Finding: ${message}`] : []
     ])
   ].join("\n");
@@ -26200,18 +26203,17 @@ function buildFindingHeadline(finding, appUrl) {
 function buildPromptSection(finding, context3, stackName) {
   const prompt = buildRemediationPrompt({
     publicId: finding.policyId,
-    metadata: { title: finding.title, description: finding.description, severity: finding.severity },
-    remediation: finding.remediation ?? "",
+    metadata: {
+      title: finding.title,
+      description: finding.description,
+      severity: finding.severity,
+      ...finding.category && { category: finding.category },
+      ...finding.kind && { kind: finding.kind },
+      ...finding.references && { references: finding.references }
+    },
+    remediation: finding.remediation,
     context: [stackName ?? void 0, void 0, `${context3.gitRef} at ${context3.headSha.slice(0, 7)}`],
-    failingResources: [
-      {
-        resource: finding.resourceId,
-        location: finding.file === null ? null : buildFilePosition(finding.file, finding.line),
-        attribute: null,
-        attributeLocation: null,
-        message: finding.message
-      }
-    ]
+    failingResources: [buildFailingResource(finding)]
   });
   return `<details>
 <summary>Prompt for an AI assistant</summary>
@@ -26219,6 +26221,17 @@ function buildPromptSection(finding, context3, stackName) {
 ${buildFencedCodeBlock(prompt, "markdown")}
 
 </details>`;
+}
+function buildFailingResource(finding) {
+  const resourceLine = finding.resourceStartLine ?? finding.line;
+  const attributeLine = finding.line !== null && finding.line !== resourceLine ? finding.line : null;
+  return {
+    resource: finding.resourceId,
+    location: finding.file === null ? null : buildFilePosition(finding.file, resourceLine),
+    attribute: finding.attribute ?? null,
+    attributeLocation: finding.file === null || attributeLine === null ? null : buildFilePosition(finding.file, attributeLine),
+    message: finding.message
+  };
 }
 function buildFixSection(fixSection, showFixes, auditUrl) {
   if (fixSection.kind === "none") return null;
