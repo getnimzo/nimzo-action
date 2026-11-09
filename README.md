@@ -70,6 +70,23 @@ The `github-token` needs these permissions, set in the workflow's `permissions` 
 
 An evaluation ends once Nimzo has suggested the fixes of its findings, which can take up to 15 minutes. The CLI waits 300 seconds for each folder by default, and a folder that takes longer is reported as "Could not evaluate". Set `timeout` to wait longer, such as `900`, and give the job a `timeout-minutes` above it.
 
+### Staging
+
+`https://staging.nimzo.dev` is only reachable from the Nimzo tailnet. To use it, Nimzo gives you a Tailscale OAuth client: store its client ID and secret as repository secrets, and join the tailnet with the [Tailscale action](https://github.com/tailscale/github-action) before the Nimzo action:
+
+```yaml
+- uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+  with:
+    oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+    oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+    tags: tag:ci
+- uses: getnimzo/nimzo-action@main
+  with:
+    nimzo-token: ${{ secrets.NIMZO_TOKEN }}
+```
+
+The job joins the tailnet as an ephemeral machine, and leaves it when the job ends.
+
 ### Verdict
 
 The verdict concludes, the worst case first:
