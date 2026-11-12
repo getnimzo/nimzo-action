@@ -99,7 +99,7 @@ The verdict concludes, the worst case first:
 
 GitHub cannot show a job as neutral, so a neutral verdict leaves the job green: its findings show as warnings in the comment, the annotations and the [`verdict` output](#verdict-output).
 
-Which findings block follows the enforcement mode set in Nimzo for the folder's stack, or else for the organization: Critical and High findings by default, Medium ones too under "Errors and warnings", every finding under "All violations".
+Which findings block follows the enforcement mode set in Nimzo for the folder's stack, or else for the organization: Critical and High findings by default, Medium ones too under "Errors and warnings", every finding under "All findings".
 
 "Could not evaluate" names the cause plainly: Nimzo's error message, the reason of a task that failed (such as `POLICY` for a policy that crashed, or `TIMEOUT`), or that the `nimzo-token` is expired or invalid. An error Nimzo did not explain, such as an unreachable host or a proxy's page, shows only "Nimzo could not be reached or sent an unexpected response", and a task that failed for a reason other than `POLICY` or `INVALID_INPUT` shows only "Nimzo could not execute the evaluation" with its reason: re-run the job with debug logging to see the full error in the log. "No policies applied" is the one case that is not red: assign a bundle to the stack in Nimzo to check it.
 
